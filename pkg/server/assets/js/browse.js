@@ -267,7 +267,7 @@ class FileBrowser {
 
     async loadHealthForEntries() {
         const names = Array.from(new Set(this.state.entries
-            .filter((e) => e && e.name)
+            .filter((e) => e && e.name && !e.is_dir)
             .map((e) => e.name)));
         if (names.length === 0) return;
         const results = await Promise.all(names.map(async (name) => {
