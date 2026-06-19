@@ -3,7 +3,7 @@ name: Beta Docker Build
 on:
   push:
     branches:
-      - beta
+      - dev
 
 permissions:
   contents: read
