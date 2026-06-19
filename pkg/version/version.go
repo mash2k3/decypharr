@@ -12,8 +12,8 @@ func (i Info) String() string {
 }
 
 var (
-	Version = ""
-	Channel = ""
+	Version = "dev"
+	Channel = "dev"
 )
 
 func GetInfo() Info {
