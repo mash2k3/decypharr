@@ -215,11 +215,35 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Download all artifacts
+      - name: Download linux-amd64
         uses: actions/download-artifact@v4
         with:
+          name: linux-amd64
           path: dist
-          merge-multiple: true
+
+      - name: Download linux-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-arm64
+          path: dist
+
+      - name: Download windows-amd64
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-amd64
+          path: dist
+
+      - name: Download darwin-amd64
+        uses: actions/download-artifact@v4
+        with:
+          name: darwin-amd64
+          path: dist
+
+      - name: Download darwin-arm64
+        uses: actions/download-artifact@v4
+        with:
+          name: darwin-arm64
+          path: dist
 
       - name: Create release
         env:
