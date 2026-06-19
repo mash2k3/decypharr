@@ -1339,50 +1339,14 @@
 
                 <div class="tab-content hidden" data-tab-content="repair">
                     <div class="space-y-6">
-                        <div>
-                            <label class="label cursor-pointer justify-start gap-3">
-                                <input type="checkbox" class="checkbox checkbox-lg checkbox-primary"
-                                       id="repair.enabled" name="repair.enabled">
-                                <div>
-                                    <span class="label-text font-medium text-lg">Enable Repair</span>
-                                    <div class="label-text-alt">When off, the scheduled sweep is unregistered. Per-entry
-                                        rechecks from the Browse
-                                        page still work.
-                                    </div>
-                                </div>
-                            </label>
-                        </div>
+                        <!-- Hidden fields — managed by CLI, not configurable here -->
+                        <input type="hidden" name="repair.enabled" value="true">
+                        <input type="hidden" name="repair.source" id="repair.source" value="managed">
+                        <input type="hidden" name="repair.schedule" id="repair.schedule" value="6h">
+                        <input type="hidden" name="repair.auto_repair" id="repair.auto_repair" value="false">
+                        <input type="hidden" name="repair.skip_nzb_repair" id="repair.skip_nzb_repair" value="false">
 
                         <div class="grid grid-cols-1 lg:grid-cols-2 gap-4">
-                            <div>
-                                <label class="label" for="repair.source">
-                                    <span class="font-medium">Source</span>
-                                </label>
-                                <select class="select w-full" name="repair.source" id="repair.source">
-                                    <option value="arr">Arr (Sonarr / Radarr)</option>
-                                    <option value="managed">Managed entries</option>
-                                </select>
-                            </div>
-
-                            <div>
-                                <label class="label" for="repair.arrs">
-                                    <span class="font-medium">Arrs to include
-                                        <span class="opacity-60 font-normal">(empty = all eligible)</span>
-                                    </span>
-                                </label>
-                                <select class="select w-full" name="repair.arrs" id="repair.arrs" multiple
-                                        size="3"></select>
-                            </div>
-
-                            <div>
-                                <label class="label" for="repair.schedule">
-                                    <span class="font-medium">Schedule</span>
-                                </label>
-                                <input type="text" class="input w-full" name="repair.schedule" id="repair.schedule"
-                                       placeholder="e.g. 6h, 04:00, 0 4 * * *">
-                                <span class="label-text-alt opacity-70">Cron expression or interval. Required when enabled.</span>
-                            </div>
-
                             <div>
                                 <label class="label" for="repair.recheck_interval">
                                     <span class="font-medium">Recheck interval</span>
@@ -1420,19 +1384,6 @@
                                     <option value="per_file">Per file</option>
                                 </select>
                             </div>
-                        </div>
-
-                        <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
-                            <label class="label cursor-pointer justify-start gap-3">
-                                <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                                       id="repair.auto_repair" name="repair.auto_repair">
-                                <span class="label-text font-medium">Auto-repair when broken</span>
-                            </label>
-                            <label class="label cursor-pointer justify-start gap-3">
-                                <input type="checkbox" class="checkbox checkbox-primary checkbox-sm"
-                                       id="repair.skip_nzb_repair" name="repair.skip_nzb_repair">
-                                <span class="label-text font-medium">Skip NZB repair</span>
-                            </label>
                         </div>
                     </div>
                 </div>
