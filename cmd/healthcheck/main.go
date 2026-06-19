@@ -3,14 +3,17 @@ package main
 import (
 	"cmp"
 	"context"
-	"encoding/json"
 	"flag"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
+	"io"
 	"net/http"
 	"os"
 	"strings"
 	"time"
+
+	json "github.com/bytedance/sonic"
+
+	"github.com/sirrobot01/decypharr/internal/config"
 )
 
 // HealthStatus represents the status of various components
@@ -23,24 +26,16 @@ type HealthStatus struct {
 
 func main() {
 	var (
-		configPath   string
-		isBasicCheck bool
-		debug        bool
+		configPath string
+		debug      bool
 	)
 	flag.StringVar(&configPath, "config", "/data", "path to the data folder")
-	flag.BoolVar(&isBasicCheck, "basic", false, "perform basic health check without WebDAV")
 	flag.BoolVar(&debug, "debug", false, "enable debug mode for detailed output")
 	flag.Parse()
 	config.SetConfigPath(configPath)
 	cfg := config.Get()
-	// Get port from environment variable or use default
-	port := getEnvOrDefault("QBIT_PORT", cfg.Port)
-	webdavPath := ""
-	for _, debrid := range cfg.Debrids {
-		if debrid.UseWebDav {
-			webdavPath = debrid.Name
-		}
-	}
+	// GetReader port from environment variable or use default
+	port := cmp.Or(os.Getenv("QBIT_PORT"), cfg.Port)
 
 	// Initialize status
 	status := HealthStatus{
@@ -51,41 +46,23 @@ func main() {
 	}
 
 	// Create a context with timeout for all HTTP requests
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
+	client := &http.Client{
+		CheckRedirect: func(req *http.Request, via []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
 
 	baseUrl := cmp.Or(cfg.URLBase, "/")
-	if !strings.HasPrefix(baseUrl, "/") {
-		baseUrl = "/" + baseUrl
-	}
+	auth := cfg.GetAuth()
 
-	// Check qBittorrent API
-	if checkQbitAPI(ctx, baseUrl, port) {
-		status.QbitAPI = true
-	}
-
-	// Check Web UI
-	if checkWebUI(ctx, baseUrl, port) {
-		status.WebUI = true
-	}
-
-	if isBasicCheck {
-		status.WebDAVService = checkBaseWebdav(ctx, baseUrl, port)
-	} else {
-		// If not a basic check, check WebDAV with debrid path
-		if webdavPath != "" {
-			status.WebDAVService = checkDebridWebDAV(ctx, baseUrl, port, webdavPath)
-		} else {
-			// If no WebDAV path is set, consider it healthy
-			status.WebDAVService = true
-		}
-	}
+	status.QbitAPI = checkQbitAPI(ctx, client, baseUrl, port, auth, cfg.UseAuth)
+	status.WebUI = checkWebUI(ctx, client, baseUrl, port, auth, cfg.UseAuth)
+	status.WebDAVService = checkBaseWebdav(ctx, client, baseUrl, port, cfg)
 	// Determine overall status
 	// Consider the application healthy if core services are running
-	status.OverallStatus = status.QbitAPI && status.WebUI
-	if webdavPath != "" {
-		status.OverallStatus = status.OverallStatus && status.WebDAVService
-	}
+	status.OverallStatus = status.QbitAPI && status.WebUI && status.WebDAVService
 
 	// Optional: output health status as JSON for logging
 	if debug {
@@ -96,80 +73,103 @@ func main() {
 	// Exit with appropriate code
 	if status.OverallStatus {
 		os.Exit(0)
-	} else {
-		os.Exit(1)
 	}
+
+	os.Exit(1)
 }
 
-func getEnvOrDefault(key, defaultValue string) string {
-	if value, exists := os.LookupEnv(key); exists {
-		return value
-	}
-	return defaultValue
-}
-
-func checkQbitAPI(ctx context.Context, baseUrl, port string) bool {
-	url := fmt.Sprintf("http://localhost:%s%sapi/v2/app/version", port, baseUrl)
+func checkQbitAPI(ctx context.Context, client *http.Client, baseUrl, port string, auth *config.Auth, authMayBeRequired bool) bool {
+	url := localURL(port, baseUrl, "api/v2/app/version")
 	req, err := http.NewRequestWithContext(ctx, "GET", url, nil)
 	if err != nil {
 		return false
 	}
+	addBearerAuth(req, auth)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp)
 
-	return resp.StatusCode == http.StatusOK
+	return isHealthyStatus(resp.StatusCode, authMayBeRequired, http.StatusOK)
 }
 
-func checkWebUI(ctx context.Context, baseUrl, port string) bool {
-	req, err := http.NewRequestWithContext(ctx, "GET", fmt.Sprintf("http://localhost:%s%s", port, baseUrl), nil)
+func checkWebUI(ctx context.Context, client *http.Client, baseUrl, port string, auth *config.Auth, authMayBeRequired bool) bool {
+	req, err := http.NewRequestWithContext(ctx, "GET", localURL(port, baseUrl, "version"), nil)
 	if err != nil {
 		return false
 	}
+	addBearerAuth(req, auth)
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp)
 
-	return resp.StatusCode == http.StatusOK
+	return isHealthyStatus(resp.StatusCode, authMayBeRequired, http.StatusOK) || isRedirect(resp.StatusCode)
 }
 
-func checkBaseWebdav(ctx context.Context, baseUrl, port string) bool {
-	url := fmt.Sprintf("http://localhost:%s%swebdav/", port, baseUrl)
+func checkBaseWebdav(ctx context.Context, client *http.Client, baseUrl, port string, cfg *config.Config) bool {
+	url := localURL(port, baseUrl, "webdav/")
 	req, err := http.NewRequestWithContext(ctx, "PROPFIND", url, nil)
 	if err != nil {
 		return false
 	}
 
-	resp, err := http.DefaultClient.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return false
 	}
-	defer resp.Body.Close()
+	defer drainAndClose(resp)
 
-	return resp.StatusCode == http.StatusMultiStatus ||
-		resp.StatusCode == http.StatusOK
+	authMayBeRequired := cfg.UseAuth && cfg.EnableWebdavAuth
+	return isHealthyStatus(resp.StatusCode, authMayBeRequired, http.StatusOK, http.StatusCreated, http.StatusMultiStatus)
 }
 
-func checkDebridWebDAV(ctx context.Context, baseUrl, port, path string) bool {
-	url := fmt.Sprintf("http://localhost:%s%swebdav/%s", port, baseUrl, path)
-	req, err := http.NewRequestWithContext(ctx, "PROPFIND", url, nil)
-	if err != nil {
+func localURL(port, baseUrl, endpoint string) string {
+	base := strings.Trim(baseUrl, "/")
+	endpoint = strings.TrimLeft(endpoint, "/")
+
+	switch {
+	case base == "" && endpoint == "":
+		return fmt.Sprintf("http://localhost:%s/", port)
+	case base == "":
+		return fmt.Sprintf("http://localhost:%s/%s", port, endpoint)
+	case endpoint == "":
+		return fmt.Sprintf("http://localhost:%s/%s/", port, base)
+	default:
+		return fmt.Sprintf("http://localhost:%s/%s/%s", port, base, endpoint)
+	}
+}
+
+func addBearerAuth(req *http.Request, auth *config.Auth) {
+	if auth == nil || auth.APIToken == "" {
+		return
+	}
+	req.Header.Set("Authorization", "Bearer "+auth.APIToken)
+}
+
+func drainAndClose(resp *http.Response) {
+	_, _ = io.Copy(io.Discard, resp.Body)
+	_ = resp.Body.Close()
+}
+
+func isHealthyStatus(statusCode int, authMayBeRequired bool, expectedStatusCodes ...int) bool {
+	for _, expectedStatusCode := range expectedStatusCodes {
+		if statusCode == expectedStatusCode {
+			return true
+		}
+	}
+
+	if !authMayBeRequired {
 		return false
 	}
 
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		return false
-	}
-	defer resp.Body.Close()
+	return statusCode == http.StatusUnauthorized || statusCode == http.StatusForbidden
+}
 
-	return resp.StatusCode == http.StatusMultiStatus ||
-		resp.StatusCode == http.StatusOK
-
+func isRedirect(statusCode int) bool {
+	return statusCode >= http.StatusMultipleChoices && statusCode < http.StatusBadRequest
 }

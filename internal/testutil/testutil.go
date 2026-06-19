@@ -34,7 +34,6 @@ func GetTestDataBytes(filename string) ([]byte, error) {
 
 // GetTestDataContent reads and returns the content of a test data file
 func GetTestDataContent(filename string) (string, error) {
-
 	content, err := GetTestDataBytes(filename)
 	return strings.TrimSpace(string(content)), err
 }

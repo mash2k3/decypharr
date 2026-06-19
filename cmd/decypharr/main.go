@@ -3,23 +3,27 @@ package decypharr
 import (
 	"context"
 	"fmt"
-	"github.com/sirrobot01/decypharr/internal/config"
-	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/pkg/qbit"
-	"github.com/sirrobot01/decypharr/pkg/server"
-	"github.com/sirrobot01/decypharr/pkg/version"
-	"github.com/sirrobot01/decypharr/pkg/web"
-	"github.com/sirrobot01/decypharr/pkg/webdav"
-	"github.com/sirrobot01/decypharr/pkg/wire"
-	"net/http"
 	"os"
 	"runtime"
 	"runtime/debug"
 	"strconv"
 	"sync"
+
+	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/manager"
+	"github.com/sirrobot01/decypharr/pkg/mount/dfs"
+	"github.com/sirrobot01/decypharr/pkg/mount/external"
+	"github.com/sirrobot01/decypharr/pkg/mount/rclone"
+	"github.com/sirrobot01/decypharr/pkg/server"
+	"github.com/sirrobot01/decypharr/pkg/version"
 )
 
 func Start(ctx context.Context) error {
+	// Start the global cached time updater to reduce time.Now() syscall overhead
+	utils.StartGlobalCachedTime()
+	defer utils.StopGlobalCachedTime()
 
 	if umaskStr := os.Getenv("UMASK"); umaskStr != "" {
 		umask, err := strconv.ParseInt(umaskStr, 8, 32)
@@ -30,12 +34,14 @@ func Start(ctx context.Context) error {
 	}
 
 	restartCh := make(chan struct{}, 1)
-	web.SetRestartFunc(func() {
+	restartFunc := func() {
 		select {
 		case restartCh <- struct{}{}:
 		default:
 		}
-	})
+	}
+
+	mgr := manager.New()
 
 	svcCtx, cancelSvc := context.WithCancel(ctx)
 	defer cancelSvc()
@@ -59,32 +65,36 @@ func Start(ctx context.Context) error {
 `, version.GetInfo(), cfg.LogLevel)
 
 		// Initialize services
-		qb := qbit.New()
-		wd := webdav.New()
+		mountMgr := createMountManager(mgr, cfg)
+		mgr.SetMountManager(mountMgr)
+		srv := server.New(mgr)
 
-		ui := web.New().Routes()
-		webdavRoutes := wd.Routes()
-		qbitRoutes := qb.Routes()
+		srv.SetRestartFunc(restartFunc)
 
-		// Register routes
-		handlers := map[string]http.Handler{
-			"/":       ui,
-			"/api/v2": qbitRoutes,
-			"/webdav": webdavRoutes,
+		resetFunc := func() {
+
+			config.Reset()
+			// Stop manager to reset ready channel and cleanup resources
+			if err := mgr.Reset(); err != nil {
+				_log.Warn().Err(err).Msg("Failed to reset manager")
+			}
+			// refresh GC
+			runtime.GC()
 		}
-		srv := server.New(handlers)
 
-		reset := func() {
-			// Reset the store and services
-			qb.Reset()
-			wire.Reset()
+		shutdownFunc := func() {
+			config.Reset()
+			// Stop manager to cleanup all resources including mounts
+			if err := mgr.Stop(); err != nil {
+				_log.Warn().Err(err).Msg("Failed to stop manager during shutdown")
+			}
 			// refresh GC
 			runtime.GC()
 		}
 
 		done := make(chan struct{})
 		go func(ctx context.Context) {
-			if err := startServices(ctx, cancelSvc, wd, srv); err != nil {
+			if err := startServices(ctx, mgr, cancelSvc, srv); err != nil {
 				_log.Error().Err(err).Msg("Error starting services")
 				cancelSvc()
 			}
@@ -97,7 +107,7 @@ func Start(ctx context.Context) error {
 			cancelSvc() // propagate to services
 			<-done      // wait for them to finish
 			_log.Info().Msg("Decypharr has been stopped gracefully.")
-			reset() // reset store and services
+			shutdownFunc() // cleanup all resources including mounts
 			return nil
 
 		case <-restartCh:
@@ -105,14 +115,27 @@ func Start(ctx context.Context) error {
 			_log.Info().Msg("Restarting Decypharr...")
 			<-done // wait for them to finish
 			_log.Info().Msg("Decypharr has been restarted.")
-			reset() // reset store and services
+			resetFunc() // reset store and services for restart
 			// rebuild svcCtx off the original parent
 			svcCtx, cancelSvc = context.WithCancel(ctx)
 		}
 	}
 }
 
-func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav.WebDav, srv *server.Server) error {
+func createMountManager(mgr *manager.Manager, cfg *config.Config) manager.MountManager {
+	switch cfg.Mount.Type {
+	case config.MountTypeRclone:
+		return rclone.NewManager(mgr)
+	case config.MountTypeDFS:
+		return dfs.NewManager(mgr)
+	case config.MountTypeExternalRclone:
+		return external.NewManager(mgr)
+	default:
+		return manager.NewStubMountManager()
+	}
+}
+
+func startServices(ctx context.Context, manager *manager.Manager, cancelSvc context.CancelFunc, srv *server.Server) error {
 	var wg sync.WaitGroup
 	errChan := make(chan error)
 
@@ -142,37 +165,12 @@ func startServices(ctx context.Context, cancelSvc context.CancelFunc, wd *webdav
 	}
 
 	safeGo(func() error {
-		return wd.Start(ctx)
-	})
-
-	safeGo(func() error {
 		return srv.Start(ctx)
 	})
 
-	// Start rclone RC server if enabled
+	// Start manager (which handles mounts, processing, etc.)
 	safeGo(func() error {
-		rcManager := wire.Get().RcloneManager()
-		if rcManager == nil {
-			return nil
-		}
-		return rcManager.Start(ctx)
-	})
-
-	if cfg := config.Get(); cfg.Repair.Enabled {
-		safeGo(func() error {
-			repair := wire.Get().Repair()
-			if repair != nil {
-				if err := repair.Start(ctx); err != nil {
-					_log.Error().Err(err).Msg("repair failed")
-				}
-			}
-			return nil
-		})
-	}
-
-	safeGo(func() error {
-		wire.Get().StartWorkers(ctx)
-		return nil
+		return manager.Start(ctx)
 	})
 
 	go func() {

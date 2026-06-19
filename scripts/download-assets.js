@@ -5,15 +5,15 @@ const path = require('path');
 const https = require('https');
 
 const buildDir = {
-    css: './pkg/web/assets/build/css',
-    js: './pkg/web/assets/build/js',
-    fonts: './pkg/web/assets/build/fonts'
+    css: './pkg/server/assets/build/css',
+    js: './pkg/server/assets/build/js',
+    fonts: './pkg/server/assets/build/fonts'
 };
 
 // Create directories
 Object.values(buildDir).forEach(dir => {
     if (!fs.existsSync(dir)) {
-        fs.mkdirSync(dir, { recursive: true });
+        fs.mkdirSync(dir, {recursive: true});
     }
 });
 
@@ -92,16 +92,16 @@ async function downloadAssets() {
         );
 
         // Write fixed CSS to source directory so it can be minified
-        const biCSSSourcePath = path.join('./pkg/web/assets/css', 'bootstrap-icons.css');
+        const biCSSSourcePath = path.join('./pkg/server/assets/css', 'bootstrap-icons.css');
         fs.writeFileSync(biCSSSourcePath, fixedCSS);
-        console.log(`   ✓ Downloaded Bootstrap Icons CSS (${(fixedCSS.length/1024).toFixed(1)}KB)`);
+        console.log(`   ✓ Downloaded Bootstrap Icons CSS (${(fixedCSS.length / 1024).toFixed(1)}KB)`);
 
         // Download other assets
         for (const download of downloads) {
             await downloadFile(download.url, download.path);
         }
 
-        console.log('\n✅ External assets downloaded successfully!');
+        console.log('\nExternal assets downloaded successfully!');
 
     } catch (error) {
         console.error('💥 Error downloading assets:', error);

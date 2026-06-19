@@ -1,0 +1,65 @@
+version: "2"
+run:
+  tests: false
+linters:
+  enable:
+    - copyloopvar
+    - dogsled
+    - goprintffuncname
+    - misspell
+    - nakedret
+    - nolintlint
+    - staticcheck
+    - unconvert
+    - unparam
+    - whitespace
+  settings:
+    goconst:
+      min-len: 2
+      min-occurrences: 2
+    gocyclo:
+      min-complexity: 15
+  exclusions:
+    generated: lax
+    presets:
+      - comments
+      - common-false-positives
+      - legacy
+      - std-error-handling
+    rules:
+      - linters:
+          - dupl
+          - goconst
+          - mnd
+        path: _test\.go
+    paths:
+      - web/
+      - migrations/
+      - docs/
+      - examples/
+      - scripts/
+      - .github/
+      - third_party$
+      - builtin$
+      - examples$
+formatters:
+  enable:
+    - gofmt
+  settings:
+    gofmt:
+      simplify: true
+    goimports:
+      local-prefixes:
+        - github.com/sirrobot01/protodex
+  exclusions:
+    generated: lax
+    paths:
+      - web/
+      - migrations/
+      - docs/
+      - examples/
+      - scripts/
+      - .github/
+      - third_party$
+      - builtin$
+      - examples$

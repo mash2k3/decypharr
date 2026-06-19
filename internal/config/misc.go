@@ -1,13 +1,64 @@
 package config
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strconv"
 	"strings"
 )
 
-func (c *Config) IsAllowedFile(filename string) bool {
+var (
+	ErrFileIsSample      = errors.New("file is sample")
+	ErrFileExtNotAllowed = errors.New("file extension not allowed")
+)
+
+var (
+	sampleMatch = `(?i)(^|[\s/\\])(sample|trailer|thumb|special|extras?)s?[-/]|(\((sample|trailer|thumb|special|extras?)s?\))|(-\s*(sample|trailer|thumb|special|extras?)s?)`
+	sampleRegex = regexp.MustCompile(sampleMatch)
+)
+
+func isSample(path string) bool {
+	filename := filepath.Base(path)
+	if strings.HasSuffix(strings.ToLower(filename), "sample.mkv") {
+		return true
+	}
+	return sampleRegex.MatchString(filename)
+}
+
+func (c *Config) IsFileAllowed(filename string, filesize int64) error {
+	// Skip samples if configured
+	if !c.AllowSamples && isSample(filename) {
+		// Skip sample files
+		return ErrFileIsSample
+	}
+
+	if !c.isNameAllowed(filename) {
+		return ErrFileExtNotAllowed
+	}
+
+	// Check size constraints
+	if !c.isSizeAllowed(filesize) {
+		return fmt.Errorf("file size %d is not allowed. expected range: [%d - %d]", filesize, c.GetMinFileSize(), c.GetMaxFileSize())
+	}
+	return nil
+}
+
+func (c *Config) isSizeAllowed(size int64) bool {
+	if size == 0 {
+		return true // Maybe the debrid hasn't reported the size yet
+	}
+	if c.GetMinFileSize() > 0 && size < c.GetMinFileSize() {
+		return false
+	}
+	if c.GetMaxFileSize() > 0 && size > c.GetMaxFileSize() {
+		return false
+	}
+	return true
+}
+func (c *Config) isNameAllowed(filename string) bool {
 	ext := strings.ToLower(filepath.Ext(filename))
 	if ext == "" {
 		return false
@@ -53,20 +104,31 @@ func getDefaultExtensions() []string {
 func ParseSize(sizeStr string) (int64, error) {
 	sizeStr = strings.ToUpper(strings.TrimSpace(sizeStr))
 
-	// Absolute size-based cache
+	// Absolute size-based cache. Order matters: two-letter units must be
+	// checked before the bare "B" suffix. ParseFloat below means decimal
+	// values (e.g. "2.2TB", "1.5GB") are supported for every unit.
 	multiplier := 1.0
-	if strings.HasSuffix(sizeStr, "GB") {
+	switch {
+	case strings.HasSuffix(sizeStr, "PB"):
+		multiplier = 1024 * 1024 * 1024 * 1024 * 1024
+		sizeStr = strings.TrimSuffix(sizeStr, "PB")
+	case strings.HasSuffix(sizeStr, "TB"):
+		multiplier = 1024 * 1024 * 1024 * 1024
+		sizeStr = strings.TrimSuffix(sizeStr, "TB")
+	case strings.HasSuffix(sizeStr, "GB"):
 		multiplier = 1024 * 1024 * 1024
 		sizeStr = strings.TrimSuffix(sizeStr, "GB")
-	} else if strings.HasSuffix(sizeStr, "MB") {
+	case strings.HasSuffix(sizeStr, "MB"):
 		multiplier = 1024 * 1024
 		sizeStr = strings.TrimSuffix(sizeStr, "MB")
-	} else if strings.HasSuffix(sizeStr, "KB") {
+	case strings.HasSuffix(sizeStr, "KB"):
 		multiplier = 1024
 		sizeStr = strings.TrimSuffix(sizeStr, "KB")
+	case strings.HasSuffix(sizeStr, "B"):
+		sizeStr = strings.TrimSuffix(sizeStr, "B")
 	}
 
-	size, err := strconv.ParseFloat(sizeStr, 64)
+	size, err := strconv.ParseFloat(strings.TrimSpace(sizeStr), 64)
 	if err != nil {
 		return 0, err
 	}

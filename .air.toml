@@ -7,7 +7,7 @@ tmp_dir = "tmp"
   bin = "./tmp/main"
   cmd = "bash -c 'go build -ldflags \"-X github.com/sirrobot01/decypharr/pkg/version.Version=0.0.0 -X github.com/sirrobot01/decypharr/pkg/version.Channel=dev\" -o ./tmp/main .'"
   delay = 1000
-  exclude_dir = ["tmp", "vendor", "testdata", "data", "logs", "docs", "dist", "node_modules", ".ven"]
+  exclude_dir = ["tmp", "vendor", "testdata", "data/media", "logs", "docs", "dist", "node_modules", ".ven", "data"]
   exclude_file = []
   exclude_regex = ["_test.go"]
   exclude_unchanged = false

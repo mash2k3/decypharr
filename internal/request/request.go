@@ -1,46 +1,23 @@
 package request
 
 import (
-	"bytes"
 	"context"
 	"crypto/tls"
-	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
-	"math/rand"
 	"net"
 	"net/http"
 	"net/url"
-	"strconv"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/hashicorp/go-retryablehttp"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"go.uber.org/ratelimit"
 	"golang.org/x/net/proxy"
 )
-
-func JoinURL(base string, paths ...string) (string, error) {
-	// Split the last path component to separate query parameters
-	lastPath := paths[len(paths)-1]
-	parts := strings.Split(lastPath, "?")
-	paths[len(paths)-1] = parts[0]
-
-	joined, err := url.JoinPath(base, paths...)
-	if err != nil {
-		return "", err
-	}
-
-	// Add back query parameters if they exist
-	if len(parts) > 1 {
-		return joined + "?" + parts[1], nil
-	}
-
-	return joined, nil
-}
 
 var (
 	once     sync.Once
@@ -51,7 +28,8 @@ type ClientOption func(*Client)
 
 // Client represents an HTTP client with additional capabilities
 type Client struct {
-	client          *http.Client
+	client          *retryablehttp.Client
+	httpClient      *http.Client // underlying http client
 	rateLimiter     ratelimit.Limiter
 	headers         map[string]string
 	headersMu       sync.RWMutex
@@ -74,12 +52,6 @@ func WithMaxRetries(maxRetries int) ClientOption {
 func WithTimeout(timeout time.Duration) ClientOption {
 	return func(c *Client) {
 		c.timeout = timeout
-	}
-}
-
-func WithRedirectPolicy(policy func(req *http.Request, via []*http.Request) error) ClientOption {
-	return func(c *Client) {
-		c.client.CheckRedirect = policy
 	}
 }
 
@@ -113,7 +85,7 @@ func WithLogger(logger zerolog.Logger) ClientOption {
 
 func WithTransport(transport *http.Transport) ClientOption {
 	return func(c *Client) {
-		c.client.Transport = transport
+		c.httpClient.Transport = transport
 	}
 }
 
@@ -133,8 +105,18 @@ func WithProxy(proxyURL string) ClientOption {
 	}
 }
 
-// doRequest performs a single HTTP request with rate limiting
-func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
+// Do performs an HTTP request with retries for certain status codes
+func (c *Client) Do(req *http.Request) (*http.Response, error) {
+	// Apply headers
+	c.headersMu.RLock()
+	if c.headers != nil {
+		for key, value := range c.headers {
+			req.Header.Set(key, value)
+		}
+	}
+	c.headersMu.RUnlock()
+
+	// Apply rate limiting
 	if c.rateLimiter != nil {
 		select {
 		case <-req.Context().Done():
@@ -144,87 +126,13 @@ func (c *Client) doRequest(req *http.Request) (*http.Response, error) {
 		}
 	}
 
-	return c.client.Do(req)
-}
-
-// Do performs an HTTP request with retries for certain status codes
-func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	// Save the request body for reuse in retries
-	var bodyBytes []byte
-	var err error
-
-	if req.Body != nil {
-		bodyBytes, err = io.ReadAll(req.Body)
-		if err != nil {
-			return nil, fmt.Errorf("reading request body: %w", err)
-		}
-		req.Body.Close()
+	// Convert to retryablehttp request
+	retryReq, err := retryablehttp.FromRequest(req)
+	if err != nil {
+		return nil, fmt.Errorf("creating retryable request: %w", err)
 	}
 
-	backoff := time.Millisecond * 500
-	var resp *http.Response
-
-	for attempt := 0; attempt <= c.maxRetries; attempt++ {
-		// Reset the request body if it exists
-		if bodyBytes != nil {
-			req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-		}
-
-		// Apply headers
-		c.headersMu.RLock()
-		if c.headers != nil {
-			for key, value := range c.headers {
-				req.Header.Set(key, value)
-			}
-		}
-		c.headersMu.RUnlock()
-
-		resp, err = c.doRequest(req)
-		if err != nil {
-			// Check if this is a network error that might be worth retrying
-			if isRetryableError(err) && attempt < c.maxRetries {
-				// Apply backoff with jitter
-				jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
-				sleepTime := backoff + jitter
-
-				select {
-				case <-req.Context().Done():
-					return nil, req.Context().Err()
-				case <-time.After(sleepTime):
-					// Continue to next retry attempt
-				}
-
-				// Exponential backoff
-				backoff *= 2
-				continue
-			}
-			return nil, err
-		}
-
-		// Check if the status code is retryable
-		if _, ok := c.retryableStatus[resp.StatusCode]; !ok || attempt == c.maxRetries {
-			return resp, nil
-		}
-
-		// Close the response body before retrying
-		resp.Body.Close()
-
-		// Apply backoff with jitter
-		jitter := time.Duration(rand.Int63n(int64(backoff / 4)))
-		sleepTime := backoff + jitter
-
-		select {
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		case <-time.After(sleepTime):
-			// Continue to next retry attempt
-		}
-
-		// Exponential backoff
-		backoff *= 2
-	}
-
-	return nil, fmt.Errorf("max retries exceeded")
+	return c.client.Do(retryReq)
 }
 
 // MakeRequest performs an HTTP request and returns the response body as bytes
@@ -264,14 +172,14 @@ func (c *Client) Get(url string) (*http.Response, error) {
 // New creates a new HTTP client with the specified options
 func New(options ...ClientOption) *Client {
 	client := &Client{
-		maxRetries:    3,
+		maxRetries:    5,
 		skipTLSVerify: true,
 		retryableStatus: map[int]struct{}{
-			http.StatusTooManyRequests:     struct{}{},
-			http.StatusInternalServerError: struct{}{},
-			http.StatusBadGateway:          struct{}{},
-			http.StatusServiceUnavailable:  struct{}{},
-			http.StatusGatewayTimeout:      struct{}{},
+			http.StatusTooManyRequests:     {},
+			http.StatusInternalServerError: {},
+			http.StatusBadGateway:          {},
+			http.StatusServiceUnavailable:  {},
+			http.StatusGatewayTimeout:      {},
 		},
 		logger:  logger.New("request"),
 		timeout: 60 * time.Second,
@@ -279,8 +187,8 @@ func New(options ...ClientOption) *Client {
 		headers: make(map[string]string),
 	}
 
-	// default http client
-	client.client = &http.Client{
+	// Create default http client
+	client.httpClient = &http.Client{
 		Timeout: client.timeout,
 	}
 
@@ -289,67 +197,71 @@ func New(options ...ClientOption) *Client {
 		option(client)
 	}
 
+	client.httpClient.Timeout = client.timeout
+
 	// Check if transport was set by WithTransport option
-	if client.client.Transport == nil {
+	if client.httpClient.Transport == nil {
 		transport := &http.Transport{
 			TLSClientConfig: &tls.Config{
 				InsecureSkipVerify: client.skipTLSVerify,
 			},
-			DisableKeepAlives: false,
+			DialContext: (&net.Dialer{
+				Timeout:   30 * time.Second,
+				KeepAlive: 15 * time.Second,
+			}).DialContext,
+			MaxIdleConns:          100,
+			MaxIdleConnsPerHost:   10,
+			IdleConnTimeout:       30 * time.Second,
+			ResponseHeaderTimeout: 30 * time.Second,
+			ExpectContinueTimeout: 1 * time.Second,
+			ForceAttemptHTTP2:     true,
 		}
 
 		// Configure proxy if needed
 		SetProxy(transport, client.proxy)
 
 		// Set the transport to the client
-		client.client.Transport = transport
+		client.httpClient.Transport = transport
 	}
+
+	// Create retryablehttp client
+	retryClient := retryablehttp.NewClient()
+	retryClient.HTTPClient = client.httpClient
+	retryClient.RetryMax = client.maxRetries
+	retryClient.RetryWaitMin = 1 * time.Second
+	retryClient.RetryWaitMax = 30 * time.Second
+	retryClient.Logger = nil // Disable default logging
+
+	// Custom retry policy based on retryable status codes
+	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {
+		// Don't retry on context errors
+		if ctx.Err() != nil {
+			return false, ctx.Err()
+		}
+
+		// First use the default retry policy for error handling
+		// This handles the case when resp is nil (network errors)
+		shouldRetry, defaultErr := retryablehttp.DefaultRetryPolicy(ctx, resp, err)
+		if defaultErr != nil {
+			return false, defaultErr
+		}
+		if shouldRetry {
+			return true, nil
+		}
+
+		// Check for retryable status codes (only if resp is not nil)
+		if resp != nil {
+			if _, ok := client.retryableStatus[resp.StatusCode]; ok {
+				return true, nil
+			}
+		}
+
+		return false, nil
+	}
+
+	client.client = retryClient
 
 	return client
-}
-
-func ParseRateLimit(rateStr string) ratelimit.Limiter {
-	if rateStr == "" {
-		return nil
-	}
-	parts := strings.SplitN(rateStr, "/", 2)
-	if len(parts) != 2 {
-		return nil
-	}
-
-	// parse count
-	count, err := strconv.Atoi(strings.TrimSpace(parts[0]))
-	if err != nil || count <= 0 {
-		return nil
-	}
-
-	// Set slack size to 10%
-	slackSize := count / 10
-
-	// normalize unit
-	unit := strings.ToLower(strings.TrimSpace(parts[1]))
-	unit = strings.TrimSuffix(unit, "s")
-	switch unit {
-	case "minute", "min":
-		return ratelimit.New(count, ratelimit.Per(time.Minute), ratelimit.WithSlack(slackSize))
-	case "second", "sec":
-		return ratelimit.New(count, ratelimit.Per(time.Second), ratelimit.WithSlack(slackSize))
-	case "hour", "hr":
-		return ratelimit.New(count, ratelimit.Per(time.Hour), ratelimit.WithSlack(slackSize))
-	case "day", "d":
-		return ratelimit.New(count, ratelimit.Per(24*time.Hour), ratelimit.WithSlack(slackSize))
-	default:
-		return nil
-	}
-}
-
-func JSONResponse(w http.ResponseWriter, data interface{}, code int) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(code)
-	err := json.NewEncoder(w).Encode(data)
-	if err != nil {
-		return
-	}
 }
 
 func Default() *Client {
@@ -359,41 +271,12 @@ func Default() *Client {
 	return instance
 }
 
-func isRetryableError(err error) bool {
-	errString := err.Error()
-
-	// Connection reset and other network errors
-	if strings.Contains(errString, "connection reset by peer") ||
-		strings.Contains(errString, "read: connection reset") ||
-		strings.Contains(errString, "connection refused") ||
-		strings.Contains(errString, "network is unreachable") ||
-		strings.Contains(errString, "connection timed out") ||
-		strings.Contains(errString, "no such host") ||
-		strings.Contains(errString, "i/o timeout") ||
-		strings.Contains(errString, "unexpected EOF") ||
-		strings.Contains(errString, "TLS handshake timeout") {
-		return true
-	}
-
-	// Check for net.Error type which can provide more information
-	var netErr net.Error
-	if errors.As(err, &netErr) {
-		// Retry on timeout errors and temporary errors
-		return netErr.Timeout()
-	}
-
-	// Not a retryable error
-	return false
-}
-
 func SetProxy(transport *http.Transport, proxyURL string) {
 	if proxyURL != "" {
 		if strings.HasPrefix(proxyURL, "socks5://") {
 			// Handle SOCKS5 proxy
 			socksURL, err := url.Parse(proxyURL)
-			if err != nil {
-				return
-			} else {
+			if err == nil {
 				auth := &proxy.Auth{}
 				if socksURL.User != nil {
 					auth.User = socksURL.User.Username()
@@ -402,9 +285,7 @@ func SetProxy(transport *http.Transport, proxyURL string) {
 				}
 
 				dialer, err := proxy.SOCKS5("tcp", socksURL.Host, auth, proxy.Direct)
-				if err != nil {
-					return
-				} else {
+				if err == nil {
 					transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
 						return dialer.Dial(network, addr)
 					}
@@ -412,53 +293,11 @@ func SetProxy(transport *http.Transport, proxyURL string) {
 			}
 		} else {
 			_proxy, err := url.Parse(proxyURL)
-			if err != nil {
-				return
-			} else {
+			if err == nil {
 				transport.Proxy = http.ProxyURL(_proxy)
 			}
 		}
 	} else {
 		transport.Proxy = http.ProxyFromEnvironment
 	}
-	return
-}
-
-func ValidateURL(urlStr string) error {
-	if urlStr == "" {
-		return fmt.Errorf("URL cannot be empty")
-	}
-
-	// Try parsing as full URL first
-	u, err := url.Parse(urlStr)
-	if err == nil && u.Scheme != "" && u.Host != "" {
-		// It's a full URL, validate scheme
-		if u.Scheme != "http" && u.Scheme != "https" {
-			return fmt.Errorf("URL scheme must be http or https")
-		}
-		return nil
-	}
-
-	// Check if it's a host:port format (no scheme)
-	if strings.Contains(urlStr, ":") && !strings.Contains(urlStr, "://") {
-		// Try parsing with http:// prefix
-		testURL := "http://" + urlStr
-		u, err := url.Parse(testURL)
-		if err != nil {
-			return fmt.Errorf("invalid host:port format: %w", err)
-		}
-
-		if u.Host == "" {
-			return fmt.Errorf("host is required in host:port format")
-		}
-
-		// Validate port number
-		if u.Port() == "" {
-			return fmt.Errorf("port is required in host:port format")
-		}
-
-		return nil
-	}
-
-	return fmt.Errorf("invalid URL format: %s", urlStr)
 }

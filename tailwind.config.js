@@ -1,12 +1,6 @@
-module.exports = {
+export default {
     content: [
-        "./pkg/web/templates/**/*.html",
-        "./pkg/web/assets/**/*.js"
-    ],
-    theme: {
-        extend: {},
-    },
-    plugins: [
-        require('daisyui'),
+        "./pkg/server/templates/**/*.html",
+        "./pkg/server/assets/**/*.js"
     ],
 };

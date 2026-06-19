@@ -4,21 +4,51 @@ import (
 	"cmp"
 	"crypto/rand"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"reflect"
 	"runtime"
 	"strings"
 	"sync"
+
+	json "github.com/bytedance/sonic"
 )
 
-type RepairStrategy string
+type (
+	WebDavFolderNaming string
+	MountType          string
+	DownloadAction     string
+	Protocol           string
+)
 
 const (
-	RepairStrategyPerFile    RepairStrategy = "per_file"
-	RepairStrategyPerTorrent RepairStrategy = "per_torrent"
+	ProtocolTorrent Protocol = "torrent"
+	ProtocolNZB     Protocol = "nzb"
+	ProtocolAll     Protocol = ""
+)
+
+const (
+	MountTypeRclone         MountType = "rclone"
+	MountTypeDFS            MountType = "dfs"
+	MountTypeExternalRclone MountType = "external_rclone"
+	MountTypeNone           MountType = "none"
+)
+
+const (
+	DownloadActionSymlink  DownloadAction = "symlink"
+	DownloadActionDownload DownloadAction = "download"
+	DownloadActionStrm     DownloadAction = "strm"
+	DownloadActionNone     DownloadAction = "none"
+)
+
+const (
+	WebDavUseFileName          WebDavFolderNaming = "filename"
+	WebDavUseOriginalName      WebDavFolderNaming = "original"
+	WebDavUseFileNameNoExt     WebDavFolderNaming = "filename_no_ext"
+	WebDavUseOriginalNameNoExt WebDavFolderNaming = "original_no_ext"
+	WebdavUseHash              WebDavFolderNaming = "infohash"
 )
 
 var (
@@ -27,59 +57,120 @@ var (
 	configPath string
 )
 
-type Debrid struct {
-	Name              string   `json:"name,omitempty"`
-	APIKey            string   `json:"api_key,omitempty"`
-	DownloadAPIKeys   []string `json:"download_api_keys,omitempty"`
-	Folder            string   `json:"folder,omitempty"`
-	RcloneMountPath   string   `json:"rclone_mount_path,omitempty"` // Custom rclone mount path for this debrid service
-	DownloadUncached  bool     `json:"download_uncached,omitempty"`
-	CheckCached       bool     `json:"check_cached,omitempty"`
-	RateLimit         string   `json:"rate_limit,omitempty"` // 200/minute or 10/second
-	RepairRateLimit   string   `json:"repair_rate_limit,omitempty"`
-	DownloadRateLimit string   `json:"download_rate_limit,omitempty"`
-	Proxy             string   `json:"proxy,omitempty"`
-	UnpackRar         bool     `json:"unpack_rar,omitempty"`
-	AddSamples        bool     `json:"add_samples,omitempty"`
-	MinimumFreeSlot   int      `json:"minimum_free_slot,omitempty"` // Minimum active pots to use this debrid
-	Limit             int      `json:"limit,omitempty"`             // Maximum number of total torrents
-
-	UseWebDav bool `json:"use_webdav,omitempty"`
-	WebDav
+// QBitTorrent is deprecated. Use Manager instead.
+// Kept for backward compatibility with existing configs.
+type QBitTorrent struct {
+	DownloadFolder      string   `json:"download_folder,omitempty"`
+	Categories          []string `json:"categories,omitempty"`
+	RefreshInterval     int      `json:"refresh_interval,omitempty"`
+	SkipPreCache        bool     `json:"skip_pre_cache,omitempty"`
+	AlwaysRmTrackerUrls bool     `json:"always_rm_tracker_urls,omitempty"`
 }
 
-type QBitTorrent struct {
-	Username          	string   `json:"username,omitempty"`
-	Password          	string   `json:"password,omitempty"`
-	Port              	string   `json:"port,omitempty"` // deprecated
-	DownloadFolder    	string   `json:"download_folder,omitempty"`
-	Categories        	[]string `json:"categories,omitempty"`
-	RefreshInterval   	int      `json:"refresh_interval,omitempty"`
-	SkipPreCache      	bool     `json:"skip_pre_cache,omitempty"`
-	MaxDownloads      	int      `json:"max_downloads,omitempty"`
-	AlwaysRmTrackerUrls bool     `json:"always_rm_tracker_urls,omitempty"`
+func (q QBitTorrent) IsZero() bool {
+	return q.DownloadFolder == "" && len(q.Categories) == 0 && q.RefreshInterval == 0 && !q.SkipPreCache && !q.AlwaysRmTrackerUrls
 }
 
 type Arr struct {
 	Name             string `json:"name,omitempty"`
 	Host             string `json:"host,omitempty"`
 	Token            string `json:"token,omitempty"`
-	Cleanup          bool   `json:"cleanup,omitempty"`
 	SkipRepair       bool   `json:"skip_repair,omitempty"`
 	DownloadUncached *bool  `json:"download_uncached,omitempty"`
 	SelectedDebrid   string `json:"selected_debrid,omitempty"`
 	Source           string `json:"source,omitempty"` // The source of the arr, e.g. "auto", "config", "". Auto means it was automatically detected from the arr
 }
 
-type Repair struct {
-	Enabled     bool           `json:"enabled,omitempty"`
-	Interval    string         `json:"interval,omitempty"`
-	ZurgURL     string         `json:"zurg_url,omitempty"`
-	AutoProcess bool           `json:"auto_process,omitempty"`
-	UseWebDav   bool           `json:"use_webdav,omitempty"`
-	Workers     int            `json:"workers,omitempty"`
-	ReInsert    bool           `json:"reinsert,omitempty"`
-	Strategy    RepairStrategy `json:"strategy,omitempty"`
+func (a Arr) IsZero() bool {
+	return a.Name == "" && a.Host == "" && a.Token == "" && !a.SkipRepair && a.DownloadUncached == nil && a.SelectedDebrid == "" && a.Source == ""
+}
+
+// QueueCleanup is the global policy that drives CleanupQueue. It maps
+// Sonarr/Radarr queue warnings/errors to an action.
+type QueueCleanup struct {
+	Rules []QueueCleanupRule `json:"rules,omitempty"`
+}
+
+// QueueCleanupRule maps a queue issue to a cleanup action.
+//
+// Catalog rules carry a non-empty ID whose match semantics are hardcoded in the
+// arr package (keyed by ID) — for these the user only customizes Action, and
+// Match is informational/display only. Custom rules have an empty ID and match
+// Match as a case-insensitive substring of the queue item's statusMessages text.
+type QueueCleanupRule struct {
+	ID     string `json:"id,omitempty"`     // catalog key; "" = user custom rule
+	Match  string `json:"match,omitempty"`  // custom: substring; catalog: display text
+	Action string `json:"action,omitempty"` // "" (ignore) | "import" | "blacklist" | "blacklist_research"
+}
+
+// DefaultQueueCleanupRules returns the built-in catalog of known Servarr queue
+// issues with sensible default actions. The order is significant: resolution is
+// first-match-wins, so more specific entries should precede broader ones.
+func DefaultQueueCleanupRules() []QueueCleanupRule {
+	return []QueueCleanupRule{
+		{ID: "failed_download", Match: "Failed download", Action: "blacklist_research"},
+		{ID: "title_mismatch", Match: "Title mismatch; automatic import is not possible", Action: "import"},
+		{ID: "matched_by_id", Match: "Matched to series/movie by ID", Action: "import"},
+		{ID: "unable_to_parse", Match: "Unable to parse download", Action: "blacklist_research"},
+		{ID: "no_eligible_files", Match: "No files found are eligible for import", Action: "blacklist_research"},
+		{ID: "episodes_missing", Match: "Episodes not imported or missing from the release", Action: "blacklist_research"},
+		{ID: "file_empty", Match: "Downloaded file is empty", Action: "blacklist_research"},
+		{ID: "invalid_local_path", Match: "Not a valid local path (remote path mapping)", Action: ""},
+		{ID: "not_grabbed", Match: "Not grabbed by the arr / no category", Action: ""},
+	}
+}
+
+// mergeQueueCleanupRules reconciles a stored rule set with the current catalog.
+// An empty set is seeded with the defaults. Otherwise the user's action choices
+// for existing catalog IDs and all custom rules are preserved, while any catalog
+// entries the user has never seen (e.g. added in a newer release) are appended
+// with their default action. Catalog display text is refreshed from the catalog.
+func mergeQueueCleanupRules(rules []QueueCleanupRule) []QueueCleanupRule {
+	defaults := DefaultQueueCleanupRules()
+	if len(rules) == 0 {
+		return defaults
+	}
+
+	stored := make(map[string]QueueCleanupRule, len(rules))
+	out := make([]QueueCleanupRule, 0, len(rules)+len(defaults))
+	for _, r := range rules {
+		if r.ID == "" {
+			// Custom rule: keep as-is (drop empties defensively).
+			if strings.TrimSpace(r.Match) != "" {
+				out = append(out, r)
+			}
+			continue
+		}
+		stored[r.ID] = r
+	}
+
+	// Emit the catalog in canonical order, preserving stored actions.
+	for _, d := range defaults {
+		if s, ok := stored[d.ID]; ok {
+			d.Action = s.Action
+		}
+		out = append(out, d)
+	}
+
+	// out currently holds [customs..., catalog...]; reorder so catalog rules
+	// come first. First-match-wins then favors the specific known issues over
+	// broad user substrings.
+	catalogFirst := make([]QueueCleanupRule, 0, len(out))
+	for _, r := range out {
+		if r.ID != "" {
+			catalogFirst = append(catalogFirst, r)
+		}
+	}
+	for _, r := range out {
+		if r.ID == "" {
+			catalogFirst = append(catalogFirst, r)
+		}
+	}
+	return catalogFirst
+}
+
+type CustomFolders struct {
+	Filters map[string]string `json:"filters,omitempty"`
 }
 
 type Auth struct {
@@ -88,98 +179,116 @@ type Auth struct {
 	APIToken string `json:"api_token,omitempty"`
 }
 
-type Rclone struct {
-	// Global mount folder where all providers will be mounted as subfolders
-	Enabled   bool   `json:"enabled,omitempty"`
-	MountPath string `json:"mount_path,omitempty"`
-	RcPort    string `json:"rc_port,omitempty"`
+// RepairSource selects where the health checker enumerates entries from.
+type RepairSource string
 
-	// Cache settings
-	CacheDir string `json:"cache_dir,omitempty"`
+const (
+	RepairSourceArr     RepairSource = "arr"
+	RepairSourceManaged RepairSource = "managed"
+)
 
-	// VFS settings
-	VfsCacheMode          string `json:"vfs_cache_mode,omitempty"`            // off, minimal, writes, full
-	VfsCacheMaxAge        string `json:"vfs_cache_max_age,omitempty"`         // Maximum age of objects in the cache (default 1h)
-	VfsDiskSpaceTotal     string `json:"vfs_disk_space_total,omitempty"`      // Total disk space available for the cache (default off)
-	VfsCacheMaxSize       string `json:"vfs_cache_max_size,omitempty"`        // Maximum size of the cache (default off)
-	VfsCachePollInterval  string `json:"vfs_cache_poll_interval,omitempty"`   // How often to poll for changes (default 1m)
-	VfsReadChunkSize      string `json:"vfs_read_chunk_size,omitempty"`       // Read chunk size (default 128M)
-	VfsReadChunkSizeLimit string `json:"vfs_read_chunk_size_limit,omitempty"` // Max chunk size (default off)
-	VfsReadAhead          string `json:"vfs_read_ahead,omitempty"`            // read ahead size
-	BufferSize            string `json:"buffer_size,omitempty"`               // Buffer size for reading files (default 16M)
-	BwLimit               string `json:"bw_limit,omitempty"`                  // Bandwidth limit (default off)
+// RepairConfig is the single, global configuration for the health checker.
+// When Enabled is true, a recurring sweep runs on Schedule and visits only
+// entries that are unhealthy, dirty, or older than RecheckInterval.
+type RepairConfig struct {
+	Enabled               bool         `json:"enabled,omitempty"`
+	Source                RepairSource `json:"source,omitempty"`
+	Schedule              string       `json:"schedule,omitempty"`
+	Workers               int          `json:"workers,omitempty"`
+	NNTPConnectionPercent int          `json:"nntp_connection_percent,omitempty"`
+	Strategy              string       `json:"strategy,omitempty"`
+	RecheckInterval       string       `json:"recheck_interval,omitempty"`
+	Arrs                  []string     `json:"arrs,omitempty"`
+	AutoRepair            bool         `json:"auto_repair,omitempty"`
+	SkipNZBRepair         bool         `json:"skip_nzb_repair,omitempty"`
+}
 
-	VfsCacheMinFreeSpace string `json:"vfs_cache_min_free_space,omitempty"`
-	VfsFastFingerprint   bool   `json:"vfs_fast_fingerprint,omitempty"`
-	VfsReadChunkStreams  int    `json:"vfs_read_chunk_streams,omitempty"`
-	AsyncRead            *bool  `json:"async_read,omitempty"` // Use async read for files
-	Transfers            int    `json:"transfers,omitempty"`  // Number of transfers to use (default 4)
-	UseMmap              bool   `json:"use_mmap,omitempty"`
-
-	// File system settings
-	UID   uint32 `json:"uid,omitempty"` // User ID for mounted files
-	GID   uint32 `json:"gid,omitempty"` // Group ID for mounted files
-	Umask string `json:"umask,omitempty"`
-
-	// Timeout settings
-	AttrTimeout  string `json:"attr_timeout,omitempty"`   // Attribute cache timeout (default 1s)
-	DirCacheTime string `json:"dir_cache_time,omitempty"` // Directory cache time (default 5m)
-
-	// Performance settings
-	NoModTime  bool `json:"no_modtime,omitempty"`  // Don't read/write modification time
-	NoChecksum bool `json:"no_checksum,omitempty"` // Don't checksum files on upload
-
-	LogLevel string `json:"log_level,omitempty"`
+func (r RepairConfig) IsZero() bool {
+	return !r.Enabled && r.Source == "" && r.Schedule == "" && r.Workers == 0 &&
+		r.NNTPConnectionPercent == 0 && r.Strategy == "" && r.RecheckInterval == "" && len(r.Arrs) == 0 &&
+		!r.AutoRepair && !r.SkipNZBRepair
 }
 
 type Config struct {
 	// server
 	BindAddress string `json:"bind_address,omitempty"`
 	URLBase     string `json:"url_base,omitempty"`
+	AppURL      string `json:"app_url,omitempty"`
 	Port        string `json:"port,omitempty"`
 
-	LogLevel           string      `json:"log_level,omitempty"`
-	Debrids            []Debrid    `json:"debrids,omitempty"`
-	QBitTorrent        QBitTorrent `json:"qbittorrent,omitempty"`
-	Arrs               []Arr       `json:"arrs,omitempty"`
-	Repair             Repair      `json:"repair,omitempty"`
-	WebDav             WebDav      `json:"webdav,omitempty"`
-	Rclone             Rclone      `json:"rclone,omitempty"`
-	AllowedExt         []string    `json:"allowed_file_types,omitempty"`
-	MinFileSize        string      `json:"min_file_size,omitempty"` // Minimum file size to download, 10MB, 1GB, etc
-	MaxFileSize        string      `json:"max_file_size,omitempty"` // Maximum file size to download (0 means no limit)
-	Path               string      `json:"-"`                       // Path to save the config file
-	UseAuth            bool        `json:"use_auth,omitempty"`
-	Auth               *Auth       `json:"-"`
-	DiscordWebhook     string      `json:"discord_webhook_url,omitempty"`
-	RemoveStalledAfter string      `json:"remove_stalled_after,omitzero"`
-	CallbackURL        string      `json:"callback_url,omitempty"`
-	EnableWebdavAuth   bool        `json:"enable_webdav_auth,omitempty"`
+	LogLevel string   `json:"log_level,omitempty"`
+	Debrids  []Debrid `json:"debrids,omitzero"`
+
+	Arrs        []Arr       `json:"arrs,omitzero"`
+	Usenet      Usenet      `json:"usenet,omitzero"`      // Usenet configuration
+	QBitTorrent QBitTorrent `json:"qbittorrent,omitzero"` // Deprecated: use Manager instead
+	Rclone      Rclone      `json:"rclone,omitzero"`      // Deprecated: use Mounts instead
+	Mount       Mount       `json:"mount,omitzero"`
+
+	AllowedExt         []string `json:"allowed_file_types,omitempty"`
+	AllowSamples       bool     `json:"allow_samples,omitempty"`
+	MinFileSize        string   `json:"min_file_size,omitempty"`
+	MaxFileSize        string   `json:"max_file_size,omitempty"`
+	RemoveStalledAfter string   `json:"remove_stalled_after,omitzero"`
+	EnableWebdavAuth   bool     `json:"enable_webdav_auth,omitempty"`
+	UseAuth            bool     `json:"use_auth,omitempty"`
+	NZBUserAgent       string   `json:"nzb_user_agent,omitempty"` // User agent for downloading NZBs
+	Auth               *Auth    `json:"-"`
+
+	DisableWebDav bool `json:"disable_webdav,omitempty"`
+
+	// Notifications configuration
+	Notifications Notifications `json:"notifications,omitempty"`
+
+	// Deprecated: Use Notifications.WebhookURL instead
+	DiscordWebhook string `json:"discord_webhook_url,omitempty"`
+	// Deprecated: Use Notifications.CallbackURL instead
+	CallbackURL string `json:"callback_url,omitempty"`
+
+	// Manager settings
+	DownloadFolder        string                   `json:"download_folder,omitempty"`
+	RefreshInterval       string                   `json:"refresh_interval,omitempty"`
+	MaxActiveDownloads    int                      `json:"max_active_downloads,omitempty"`
+	SkipPreCache          bool                     `json:"skip_pre_cache,omitempty"`
+	SkipMultiSeason       bool                     `json:"skip_multi_season,omitempty"`
+	AlwaysRmTrackerUrls   bool                     `json:"always_rm_tracker_urls,omitempty"`
+	Categories            []string                 `json:"categories,omitempty"`
+	FolderNaming          WebDavFolderNaming       `json:"folder_naming,omitempty"`
+	CustomFolders         map[string]CustomFolders `json:"custom_folders,omitempty"`
+	DefaultDownloadAction DownloadAction           `json:"default_download_action,omitempty"`
+
+	RefreshDirs  string `json:"refresh_dirs,omitempty"`
+	Retries      int    `json:"retries,omitempty"`
+	SkipAutoMove bool   `json:"skip_auto_move,omitempty"`
+
+	Repair RepairConfig `json:"repair,omitzero"`
+
+	// QueueCleanup is the global arr queue-cleanup policy (see CleanupQueue).
+	QueueCleanup QueueCleanup `json:"queue_cleanup,omitempty"`
 }
 
 func (c *Config) JsonFile() string {
-	return filepath.Join(c.Path, "config.json")
+	return filepath.Join(GetMainPath(), "config.json")
 }
 func (c *Config) AuthFile() string {
-	return filepath.Join(c.Path, "auth.json")
+	return filepath.Join(GetMainPath(), "auth.json")
 }
 
 func (c *Config) TorrentsFile() string {
-	return filepath.Join(c.Path, "torrents.json")
+	return filepath.Join(GetMainPath(), "torrents.json")
 }
 
 func (c *Config) loadConfig() error {
 	// Load the config file
-	if configPath == "" {
-		return fmt.Errorf("config path not set")
-	}
-	c.Path = configPath
-	file, err := os.ReadFile(c.JsonFile())
+	// Read the JSON config file directly
+	configFile := c.JsonFile()
+	fmt.Printf("Loading config from %s\n", configFile)
+	data, err := os.ReadFile(configFile)
 	if err != nil {
 		if os.IsNotExist(err) {
-			fmt.Printf("Config file not found, creating a new one at %s\n", c.JsonFile())
+			fmt.Printf("Config file not found, creating a new one at %s\n", configFile)
 			// Create a default config file if it doesn't exist
-			if err := c.createConfig(c.Path); err != nil {
+			if err := c.createConfig(); err != nil {
 				return fmt.Errorf("failed to create config file: %w", err)
 			}
 			return c.Save()
@@ -187,64 +296,36 @@ func (c *Config) loadConfig() error {
 		return fmt.Errorf("error reading config file: %w", err)
 	}
 
-	if err := json.Unmarshal(file, &c); err != nil {
-		return fmt.Errorf("error unmarshaling config: %w", err)
+	// Parse JSON
+	if err := json.Unmarshal(data, &c); err != nil {
+		return fmt.Errorf("error parsing config JSON: %w", err)
 	}
+
+	// Set defaults for any missing values
 	c.setDefaults()
-	return nil
-}
 
-func validateDebrids(debrids []Debrid) error {
-	if len(debrids) == 0 {
-		return errors.New("no debrids configured")
-	}
-
-	for _, debrid := range debrids {
-		// Basic field validation
-		if debrid.APIKey == "" {
-			return errors.New("debrid api key is required")
-		}
-		if debrid.Folder == "" {
-			return errors.New("debrid folder is required")
-		}
-	}
+	// Apply environment variable overrides
+	c.applyEnvOverrides()
 
 	return nil
 }
 
-func validateQbitTorrent(config *QBitTorrent) error {
-	if config.DownloadFolder == "" {
-		return errors.New("qbittorent download folder is required")
-	}
-	if _, err := os.Stat(config.DownloadFolder); os.IsNotExist(err) {
-		return fmt.Errorf("qbittorent download folder(%s) does not exist", config.DownloadFolder)
-	}
-	return nil
-}
-
-func validateRepair(config *Repair) error {
-	if !config.Enabled {
-		return nil
-	}
-	if config.Interval == "" {
-		return errors.New("repair interval is required")
-	}
-	return nil
-}
-
-func ValidateConfig(config *Config) error {
-	// Run validations concurrently
-
-	if err := validateDebrids(config.Debrids); err != nil {
+func (c *Config) Validate() error {
+	if err := validateDebrids(c.Debrids); err != nil {
 		return err
 	}
 
-	if err := validateQbitTorrent(&config.QBitTorrent); err != nil {
+	if err := validateUsenet(c.Usenet.Providers); err != nil {
 		return err
 	}
 
-	if err := validateRepair(&config.Repair); err != nil {
-		return err
+	if c.DownloadFolder == "" {
+		return errors.New("download folder is required")
+	}
+
+	// If either debrid or usenet is enabled, at least one must be configured
+	if len(c.Debrids) == 0 && len(c.Usenet.Providers) == 0 {
+		return errors.New("at least one debrid provider or usenet provider must be configured")
 	}
 
 	return nil
@@ -261,6 +342,10 @@ func generateAPIToken() (string, error) {
 
 func SetConfigPath(path string) {
 	configPath = path
+}
+
+func GetMainPath() string {
+	return configPath
 }
 
 func Get() *Config {
@@ -298,21 +383,8 @@ func (c *Config) GetMaxFileSize() int64 {
 	return s
 }
 
-func (c *Config) IsSizeAllowed(size int64) bool {
-	if size == 0 {
-		return true // Maybe the debrid hasn't reported the size yet
-	}
-	if c.GetMinFileSize() > 0 && size < c.GetMinFileSize() {
-		return false
-	}
-	if c.GetMaxFileSize() > 0 && size > c.GetMaxFileSize() {
-		return false
-	}
-	return true
-}
-
 func (c *Config) SecretKey() string {
-	return cmp.Or(os.Getenv("DECYPHARR_SECRET_KEY"), "\"wqj(v%lj*!-+kf@4&i95rhh_!5_px5qnuwqbr%cjrvrozz_r*(\"")
+	return cmp.Or(getEnv("SECRET_KEY"), "\"wqj(v%lj*!-+kf@4&i95rhh_!5_px5qnuwqbr%cjrvrozz_r*(\"")
 }
 
 func (c *Config) GetAuth() *Auth {
@@ -340,78 +412,139 @@ func (c *Config) SaveAuth(auth *Auth) error {
 	return os.WriteFile(c.AuthFile(), data, 0644)
 }
 
-func (c *Config) CheckSetup() error {
-	return ValidateConfig(c)
-}
-
 func (c *Config) NeedsAuth() bool {
 	return c.UseAuth && (c.Auth == nil || c.Auth.Username == "" || c.Auth.Password == "")
 }
 
-func (c *Config) updateDebrid(d Debrid) Debrid {
-	workers := runtime.NumCPU() * 50
-	perDebrid := workers / len(c.Debrids)
-
-	var downloadKeys []string
-
-	if len(d.DownloadAPIKeys) > 0 {
-		downloadKeys = d.DownloadAPIKeys
-	} else {
-		// If no download API keys are specified, use the main API key
-		downloadKeys = []string{d.APIKey}
-	}
-	d.DownloadAPIKeys = downloadKeys
-
-	if !d.UseWebDav {
-		return d
+// migrateQBitTorrentToManager migrates deprecated QBitTorrent config to Manager
+// This ensures backward compatibility with existing configs
+func (c *Config) migrateQBitTorrentToManager() {
+	// If Manager fields are not set but QBitTorrent fields are, migrate them
+	if c.DownloadFolder == "" && c.QBitTorrent.DownloadFolder != "" {
+		c.DownloadFolder = c.QBitTorrent.DownloadFolder
 	}
 
-	if d.TorrentsRefreshInterval == "" {
-		d.TorrentsRefreshInterval = cmp.Or(c.WebDav.TorrentsRefreshInterval, "45s") // 45 seconds
-	}
-	if d.WebDav.DownloadLinksRefreshInterval == "" {
-		d.DownloadLinksRefreshInterval = cmp.Or(c.WebDav.DownloadLinksRefreshInterval, "40m") // 40 minutes
-	}
-	if d.Workers == 0 {
-		d.Workers = perDebrid
-	}
-	if d.FolderNaming == "" {
-		d.FolderNaming = cmp.Or(c.WebDav.FolderNaming, "original_no_ext")
-	}
-	if d.AutoExpireLinksAfter == "" {
-		d.AutoExpireLinksAfter = cmp.Or(c.WebDav.AutoExpireLinksAfter, "3d") // 2 days
+	if len(c.Categories) == 0 && len(c.QBitTorrent.Categories) > 0 {
+		c.Categories = c.QBitTorrent.Categories
 	}
 
-	// Merge debrid specified directories with global directories
-
-	directories := c.WebDav.Directories
-	if directories == nil {
-		directories = make(map[string]WebdavDirectories)
+	if c.RefreshInterval == "" && c.QBitTorrent.RefreshInterval > 0 {
+		c.RefreshInterval = fmt.Sprintf("%ds", c.QBitTorrent.RefreshInterval)
 	}
 
-	for name, dir := range d.Directories {
-		directories[name] = dir
+	if !c.SkipPreCache && c.QBitTorrent.SkipPreCache {
+		c.SkipPreCache = c.QBitTorrent.SkipPreCache
 	}
-	d.Directories = directories
 
-	d.RcUrl = cmp.Or(d.RcUrl, c.WebDav.RcUrl)
-	d.RcUser = cmp.Or(d.RcUser, c.WebDav.RcUser)
-	d.RcPass = cmp.Or(d.RcPass, c.WebDav.RcPass)
+	if !c.AlwaysRmTrackerUrls && c.QBitTorrent.AlwaysRmTrackerUrls {
+		c.AlwaysRmTrackerUrls = c.QBitTorrent.AlwaysRmTrackerUrls
+	}
 
-	return d
+	// Set default download folder if not set
+	if c.DownloadFolder == "" {
+		c.DownloadFolder = filepath.Join(GetMainPath(), "downloads")
+	}
+
+	// Set default categories if not set
+	if len(c.Categories) == 0 {
+		c.Categories = []string{"sonarr", "radarr"}
+	}
+
+	// Set default refresh interval if not set
+	if c.RefreshInterval == "" {
+		c.RefreshInterval = "30s"
+	}
+}
+
+// migrateNotifications migrates deprecated DiscordWebhook and CallbackURL to Notifications
+// This ensures backward compatibility with existing configs
+func (c *Config) migrateNotifications() {
+	// Migrate deprecated webhook URL to Notifications
+	if c.Notifications.WebhookURL == "" && c.DiscordWebhook != "" {
+		c.Notifications.WebhookURL = c.DiscordWebhook
+		c.Notifications.Enabled = true
+	}
+
+	// Migrate deprecated callback URL to Notifications
+	if c.Notifications.CallbackURL == "" && c.CallbackURL != "" {
+		c.Notifications.CallbackURL = c.CallbackURL
+		c.Notifications.Enabled = true
+	}
+
+	// Auto-enable notifications if any URL is configured
+	if c.Notifications.WebhookURL != "" || c.Notifications.CallbackURL != "" {
+		c.Notifications.Enabled = true
+	}
 }
 
 func (c *Config) setDefaults() {
+	// Migrate deprecated fields to Manager (backward compatibility)
+	c.migrateQBitTorrentToManager()
+	c.migrateNotifications()
+
+	if c.DefaultDownloadAction == "" {
+		c.DefaultDownloadAction = DownloadActionSymlink
+	}
+	if c.MaxActiveDownloads <= 0 {
+		c.MaxActiveDownloads = 5
+	}
+
 	for i, debrid := range c.Debrids {
 		c.Debrids[i] = c.updateDebrid(debrid)
 	}
 
+	// Set usenet defaults
+	c.updateUsenetConfig()
+
+	firstDebrid := Debrid{}
+	if len(c.Debrids) > 0 {
+		firstDebrid = c.Debrids[0]
+	}
+
+	if c.Mount.Type == "" {
+		if c.Rclone.Enabled {
+			c.Mount.Type = MountTypeRclone
+			c.Mount.Rclone = c.Rclone
+		}
+	}
+
+	if c.Mount.MountPath == "" {
+		// Set MountPath from debridConfig.Folder by splliting it
+		// debrid.Folder is usually {mount_path}/{debrid_name}/__all__ or {mount_path}/{debrid_name}/torrents
+		if len(c.Debrids) > 0 {
+			folder := filepath.Clean(firstDebrid.Folder)
+			c.Mount.MountPath = filepath.Dir(folder)
+		}
+	}
+
+	// Move WebDav global settings to Manager if not set
+	if c.Mount.ExternalRclone.RCUrl == "" {
+		c.Mount.ExternalRclone.RCUrl = firstDebrid.RcUrl
+	}
+	if c.Mount.ExternalRclone.RCUsername == "" {
+		c.Mount.ExternalRclone.RCUsername = firstDebrid.RcUser
+	}
+	if c.Mount.ExternalRclone.RCPassword == "" {
+		c.Mount.ExternalRclone.RCPassword = firstDebrid.RcPass
+	}
+
+	if c.FolderNaming == "" {
+		c.FolderNaming = WebDavFolderNaming(firstDebrid.FolderNaming)
+	}
+
+	// Set default allowed extensions if not set in Manager
 	if len(c.AllowedExt) == 0 {
 		c.AllowedExt = getDefaultExtensions()
 	}
 
-	c.Port = cmp.Or(c.Port, c.QBitTorrent.Port)
+	// Set default error threshold for multi-debrid switching
+	if c.Retries == 0 {
+		c.Retries = 3 // Default to 3 consecutive errors before switching
+	}
 
+	c.QueueCleanup.Rules = mergeQueueCleanupRules(c.QueueCleanup.Rules)
+
+	// Basic defaults
 	if c.URLBase == "" {
 		c.URLBase = "/"
 	}
@@ -423,38 +556,69 @@ func (c *Config) setDefaults() {
 		c.URLBase += "/"
 	}
 
-	// Set repair defaults
-	if c.Repair.Strategy == "" {
-		c.Repair.Strategy = RepairStrategyPerTorrent
+	if c.Port == "" {
+		c.Port = DefaultPort
+	}
+
+	if c.LogLevel == "" {
+		c.LogLevel = DefaultLogLevel
 	}
 
 	// Rclone defaults
-	if c.Rclone.Enabled {
-		c.Rclone.RcPort = cmp.Or(c.Rclone.RcPort, "5572")
-		if c.Rclone.AsyncRead == nil {
+	if c.Mount.Type == MountTypeRclone {
+		c.Mount.Rclone.Port = cmp.Or(c.Rclone.Port, DefaultRclonePort)
+		if c.Mount.Rclone.AsyncRead == nil {
 			_asyncTrue := true
-			c.Rclone.AsyncRead = &_asyncTrue
+			c.Mount.Rclone.AsyncRead = &_asyncTrue
 		}
-		c.Rclone.VfsCacheMode = cmp.Or(c.Rclone.VfsCacheMode, "off")
-		if c.Rclone.UID == 0 {
-			c.Rclone.UID = uint32(os.Getuid())
+		c.Mount.Rclone.VfsCacheMode = cmp.Or(c.Mount.Rclone.VfsCacheMode, "off")
+		if c.Mount.Rclone.UID == 0 {
+			c.Mount.Rclone.UID = uint32(os.Getuid())
 		}
-		if c.Rclone.GID == 0 {
+		if c.Mount.Rclone.GID == 0 {
 			if runtime.GOOS == "windows" {
 				// On Windows, we use the current user's SID as GID
-				c.Rclone.GID = uint32(os.Getuid()) // Windows does not have GID, using UID instead
+				c.Mount.Rclone.GID = uint32(os.Getuid()) // Windows does not have GID, using UID instead
 			} else {
-				c.Rclone.GID = uint32(os.Getgid())
+				c.Mount.Rclone.GID = uint32(os.Getgid())
 			}
 		}
-		if c.Rclone.Transfers == 0 {
-			c.Rclone.Transfers = 4 // Default number of transfers
+		if c.Mount.Rclone.Transfers == 0 {
+			c.Mount.Rclone.Transfers = 4 // Default number of transfers
 		}
-		if c.Rclone.VfsCacheMode != "off" {
-			c.Rclone.VfsCachePollInterval = cmp.Or(c.Rclone.VfsCachePollInterval, "1m") // Clean cache every minute
+		if c.Mount.Rclone.VfsCacheMode != "off" {
+			c.Mount.Rclone.VfsCachePollInterval = cmp.Or(c.Rclone.VfsCachePollInterval, "1m") // Clean cache every minute
 		}
-		c.Rclone.DirCacheTime = cmp.Or(c.Rclone.DirCacheTime, "5m")
-		c.Rclone.LogLevel = cmp.Or(c.Rclone.LogLevel, "INFO")
+		c.Mount.Rclone.DirCacheTime = cmp.Or(c.Rclone.DirCacheTime, "5m")
+		c.Mount.Rclone.LogLevel = cmp.Or(c.Rclone.LogLevel, strings.ToUpper(DefaultLogLevel))
+	}
+
+	// DFS defaults
+	if c.Mount.Type == MountTypeDFS {
+		if c.Mount.DFS.ChunkSize == "" {
+			c.Mount.DFS.ChunkSize = DefaultDFSChunkSize
+		}
+		if c.Mount.DFS.ReadAheadSize == "" {
+			c.Mount.DFS.ReadAheadSize = DefaultDFSReadAheadSize
+		}
+		if c.Mount.DFS.CacheExpiry == "" {
+			c.Mount.DFS.CacheExpiry = DefaultDFSCacheExpiry
+		}
+		if c.Mount.DFS.DiskCacheSize == "" {
+			c.Mount.DFS.DiskCacheSize = DefaultDFSDiskCacheSize
+		}
+
+		if c.Mount.DFS.UID == 0 {
+			c.Mount.DFS.UID = uint32(os.Getuid())
+		}
+		if c.Mount.DFS.GID == 0 {
+			if runtime.GOOS == "windows" {
+				// On Windows, we use the current user's SID as GID
+				c.Mount.DFS.GID = uint32(os.Getuid()) // Windows does not have GID, using UID instead
+			} else {
+				c.Mount.DFS.GID = uint32(os.Getgid())
+			}
+		}
 	}
 	// Load the auth file
 	c.Auth = c.GetAuth()
@@ -472,48 +636,161 @@ func (c *Config) setDefaults() {
 			}
 		}
 	}
+
+	// Set folder naming from first debrid if available
+	if len(c.Debrids) > 0 && c.FolderNaming == "" {
+		c.FolderNaming = WebDavFolderNaming(c.Debrids[0].FolderNaming)
+	}
+
+	c.applyRepairDefaults()
+}
+
+func (c *Config) applyRepairDefaults() {
+	if c.Repair.Source == "" {
+		c.Repair.Source = RepairSourceArr
+	}
+	if c.Repair.Workers <= 0 {
+		c.Repair.Workers = 5
+	}
+	if c.Repair.Strategy == "" {
+		c.Repair.Strategy = "per_entry"
+	}
+	if c.Repair.RecheckInterval == "" {
+		c.Repair.RecheckInterval = "168h"
+	}
+
+	if c.Repair.NNTPConnectionPercent == 0 {
+		c.Repair.NNTPConnectionPercent = 20
+	}
 }
 
 func (c *Config) Save() error {
-
 	c.setDefaults()
-
 	data, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
 	}
-
 	if err := os.WriteFile(c.JsonFile(), data, 0644); err != nil {
+		fmt.Printf("Failed to write config file: %v\n", err)
 		return err
 	}
 	return nil
 }
 
-func (c *Config) createConfig(path string) error {
+func Reset() {
+	once = sync.Once{}
+	instance = nil
+}
+
+// clearHotFields zeroes every field that can be applied at runtime without a
+// full service restart. It is used by RequiresRestart so that only the
+// remaining ("cold") fields participate in the change comparison.
+//
+// IMPORTANT: any new Config field defaults to "cold" (restart-required) unless
+// it is added here. That is deliberate — it is always safe to fall back to a
+// restart, but never safe to skip one for a field that needs it.
+func clearHotFields(c *Config) {
+	// Auth lives in auth.json and is preserved separately by the caller.
+	c.Auth = nil
+
+	// AppURL is only read live (e.g. STRM URL generation in the downloader);
+	// it is never cached in a service struct, so it applies without a restart.
+	c.AppURL = ""
+
+	// Auth toggles are evaluated live per-request by every auth middleware
+	// (main app, qbit, sabnzbd, and webdav), so they apply without a restart.
+	c.UseAuth = false
+	c.EnableWebdavAuth = false
+
+	// Manager / processing settings — read live via config.Get() on the
+	// relevant code paths, or applied lazily on the next natural restart.
+	c.Arrs = nil
+	c.AllowedExt = nil
+	c.AllowSamples = false
+	c.MinFileSize = ""
+	c.MaxFileSize = ""
+	c.RemoveStalledAfter = ""
+	c.NZBUserAgent = ""
+	c.Notifications = Notifications{}
+	c.DiscordWebhook = ""
+	c.CallbackURL = ""
+	c.DownloadFolder = ""
+	c.RefreshInterval = ""
+	c.MaxActiveDownloads = 0
+	c.SkipPreCache = false
+	c.SkipMultiSeason = false
+	c.AlwaysRmTrackerUrls = false
+	c.Categories = nil
+	c.FolderNaming = ""
+	c.CustomFolders = nil
+	c.DefaultDownloadAction = ""
+	c.RefreshDirs = ""
+	c.Retries = 0
+	c.SkipAutoMove = false
+	c.Repair = RepairConfig{}
+
+	// Queue cleanup rules are read live via config.Get() inside CleanupQueue,
+	// so changes apply on the next cleanup cycle without a restart.
+	c.QueueCleanup = QueueCleanup{}
+
+	// Deprecated, migrated into Manager fields above.
+	c.QBitTorrent = QBitTorrent{}
+
+	// Usenet is mostly cold (providers, connection pool sizing, socket buffers,
+	// and the streaming buffer pool are all established at startup). But the
+	// availability sampling percentages are read live on each repair/import
+	// check (see Usenet.CheckFile / checkNZBAvailability), so they apply without
+	// a restart. Everything else in Usenet stays restart-required.
+	c.Usenet.AvailabilitySamplePercent = 0
+	c.Usenet.ImportAvailabilitySamplePercent = 0
+}
+
+// RequiresRestart reports whether applying n on top of c needs a full service
+// restart (re-binding the HTTP listener, recreating debrid/usenet clients, or
+// re-mounting the filesystem). It returns false when only runtime-applicable
+// ("hot") fields changed, in which case the caller can use ApplyRuntime to
+// update the live config in place without tearing anything down.
+//
+// Both configs are compared after their defaults have been applied (see
+// setDefaults / Save), so callers should persist n before calling this.
+func (c *Config) RequiresRestart(n *Config) bool {
+	a, b := *c, *n
+	clearHotFields(&a)
+	clearHotFields(&b)
+	return !reflect.DeepEqual(a, b)
+}
+
+// ApplyRuntime copies n into the live config in place, preserving the in-memory
+// Auth pointer. Because every holder of the *Config singleton shares this
+// struct, the updated values become visible everywhere without a restart.
+//
+// Only call this when RequiresRestart(n) is false: the cold fields are then
+// identical between c and n, so this effectively updates just the hot fields.
+func (c *Config) ApplyRuntime(n *Config) {
+	auth := c.Auth
+	*c = *n
+	c.Auth = auth
+}
+
+func (c *Config) createConfig() error {
 	// Create the directory if it doesn't exist
-	if err := os.MkdirAll(path, 0755); err != nil {
+	if err := os.MkdirAll(GetMainPath(), 0755); err != nil {
 		return fmt.Errorf("failed to create config directory: %w", err)
 	}
-
-	c.Path = path
 	c.URLBase = "/"
-	c.Port = "8282"
-	c.LogLevel = "info"
+	c.Port = DefaultPort
+	c.LogLevel = DefaultLogLevel
 	c.UseAuth = true
-	c.QBitTorrent = QBitTorrent{
-		DownloadFolder:  filepath.Join(path, "downloads"),
-		Categories:      []string{"sonarr", "radarr"},
-		RefreshInterval: 15,
-	}
 	return nil
 }
 
-// Reload forces a reload of the configuration from disk
-func Reload() {
-	instance = nil
-	once = sync.Once{}
+func (c *Config) SetupComplete() error {
+	return c.Validate()
 }
 
-func DefaultFreeSlot() int {
-	return 10
+func (c *Config) SetupError() string {
+	if err := c.Validate(); err != nil {
+		return err.Error()
+	}
+	return ""
 }

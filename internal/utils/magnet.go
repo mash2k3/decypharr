@@ -3,7 +3,7 @@ package utils
 import (
 	"bufio"
 	"bytes"
-	"context"
+	"crypto/rand"
 	"encoding/base32"
 	"encoding/hex"
 	"fmt"
@@ -13,11 +13,9 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
-	"time"
 
 	"github.com/anacrolix/torrent/metainfo"
 	"github.com/sirrobot01/decypharr/internal/logger"
-	"github.com/sirrobot01/decypharr/internal/request"
 )
 
 var (
@@ -217,48 +215,6 @@ func processInfoHash(input string) (string, error) {
 	return "", fmt.Errorf("invalid infohash: %s", input)
 }
 
-func GetInfohashFromURL(url string) (string, error) {
-	// Download the torrent file
-	var magnetLink string
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	redirectFunc := func(req *http.Request, via []*http.Request) error {
-		if len(via) >= 3 {
-			return fmt.Errorf("stopped after 3 redirects")
-		}
-		if strings.HasPrefix(req.URL.String(), "magnet:") {
-			// Stop the redirect chain
-			magnetLink = req.URL.String()
-			return http.ErrUseLastResponse
-		}
-		return nil
-	}
-	client := request.New(
-		request.WithTimeout(30*time.Second),
-		request.WithRedirectPolicy(redirectFunc),
-	)
-	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
-	if err != nil {
-		return "", err
-	}
-	resp, err := client.Do(req)
-	if err != nil {
-		return "", err
-	}
-	defer resp.Body.Close()
-	if magnetLink != "" {
-		return ExtractInfoHash(magnetLink), nil
-	}
-
-	mi, err := metainfo.Load(resp.Body)
-	if err != nil {
-		return "", err
-	}
-	hash := mi.HashInfoBytes()
-	infoHash := hash.HexString()
-	return infoHash, nil
-}
-
 func ConstructMagnet(infoHash, name string) *Magnet {
 	// Create a magnet link from the infohash and name
 	name = url.QueryEscape(strings.TrimSpace(name))
@@ -269,4 +225,14 @@ func ConstructMagnet(infoHash, name string) *Magnet {
 		Size:     0,
 		Link:     magnetUri,
 	}
+}
+
+func GenerateInfoHash() string {
+	// Generate a random 40-character hexadecimal string (20 bytes = 40 hex chars)
+	b := make([]byte, 20)
+	_, err := io.ReadFull(rand.Reader, b)
+	if err != nil {
+		return ""
+	}
+	return hex.EncodeToString(b)
 }

@@ -1,21 +1,19 @@
 # Decypharr
 
-![ui](docs/docs/images/main.png)
+![ui](docs/src/assets/images/index.png)
 
-**Decypharr** is an implementation of QbitTorrent with **Multiple Debrid service support**, written in Go.
+**Decypharr** is a **Media Gateway** for Debrid services and Usenet written in Go.
 
 ## What is Decypharr?
 
-Decypharr combines the power of QBittorrent with popular Debrid services to enhance your media management. It provides a familiar interface for Sonarr, Radarr, and other \*Arr applications.
+Decypharr provides a unified interface for Sonarr, Radarr, and other *Arr applications to access Debrid providers and
+Usenet streaming.
 
 ## Features
 
-- Mock Qbittorent API that supports the Arrs (Sonarr, Radarr, Lidarr etc)
-- Full-fledged UI for managing torrents
-- Multiple Debrid providers support
-- WebDAV server support for each debrid provider
-- Optional mounting of WebDAV to your system(using [Rclone](https://rclone.org/))
-- Repair Worker for missing files
+- Mock Qbittorent and Sabnzbd API that supports the Arrs (Sonarr, Radarr, Lidarr etc)
+- Multiple Debrid and usenet providers support with a single interface
+- Direct Usenet streaming via NNTP (no separate download client required)
 
 ## Supported Debrid Providers
 
@@ -23,6 +21,7 @@ Decypharr combines the power of QBittorrent with popular Debrid services to enha
 - [Torbox](https://torbox.app)
 - [Debrid Link](https://debrid-link.com)
 - [All Debrid](https://alldebrid.com)
+- [Premiumize](https://www.premiumize.me)
 
 ## Quick Start
 
@@ -47,26 +46,18 @@ services:
       - apparmor:unconfined
 ```
 
+> Prefer not to self-host? A managed Decypharr instance is available
+> via [ElfHosted](https://store.elfhosted.com/product/decypharr/?utm_source=github&utm_medium=readme&utm_campaign=decypharr-readme),
+> preconfigured alongside Sonarr/Radarr to route requests to your debrid provider (7-day trial).
+
 ## Documentation
 
-For complete documentation, please visit our [Documentation](https://sirrobot01.github.io/decypharr/).
-
-The documentation includes:
-
-- Detailed installation instructions
-- Configuration guide
-- Usage with Sonarr/Radarr
-- WebDAV setup
-- Repair Worker information
-- ...and more!
-
-## Basic Configuration
-
-You can configure Decypharr through the Web UI or by editing the `config.json` file directly.
+For complete documentation, please visit our [Documentation](https://docs.decypharr.com).
 
 ## Contributing
 
 Contributions are welcome! Please feel free to submit a Pull Request.
 
 ## License
+
 This project is licensed under the MIT License. See the [LICENSE](LICENSE) file for details.

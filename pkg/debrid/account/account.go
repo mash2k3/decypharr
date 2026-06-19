@@ -1,9 +1,8 @@
 package account
 
 import (
-	"fmt"
-	"net/http"
 	"sync/atomic"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/request"
@@ -19,6 +18,7 @@ type Account struct {
 	TrafficUsed atomic.Int64                           `json:"traffic_used"` // Traffic used in bytes
 	Username    string                                 `json:"username"`     // Username for the account
 	httpClient  *request.Client
+	Expiration  time.Time `json:"expiration"`
 
 	// Account reactivation tracking
 	DisableCount atomic.Int32 `json:"disable_count"`
@@ -46,22 +46,34 @@ func (a *Account) sliceFileLink(fileLink string) string {
 	return fileLink[0:39]
 }
 
-func (a *Account) GetDownloadLink(fileLink string) (types.DownloadLink, error) {
-	slicedLink := a.sliceFileLink(fileLink)
+func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
+	slicedLink := a.sliceFileLink(file.Link)
 	dl, ok := a.links.Load(slicedLink)
 	if !ok {
-		return types.DownloadLink{}, types.ErrDownloadLinkNotFound
+		var err error
+		dl, err = fetcher(a, id, file)
+		if err != nil {
+			return dl, err
+		}
+		a.storeLink(dl)
+	}
+	if err := dl.Valid(); err != nil {
+		return types.DownloadLink{}, err
 	}
 	return dl, nil
 }
 
-func (a *Account) StoreDownloadLink(dl types.DownloadLink) {
+func (a *Account) storeLink(dl types.DownloadLink) {
 	slicedLink := a.sliceFileLink(dl.Link)
 	a.links.Store(slicedLink, dl)
 }
-func (a *Account) DeleteDownloadLink(fileLink string) {
-	slicedLink := a.sliceFileLink(fileLink)
+func (a *Account) DeleteLink(link types.DownloadLink, deleter LinkDeleter) error {
+	slicedLink := a.sliceFileLink(link.Link)
 	a.links.Delete(slicedLink)
+	if deleter != nil {
+		return deleter(a, link)
+	}
+	return nil
 }
 func (a *Account) ClearDownloadLinks() {
 	a.links.Clear()
@@ -69,9 +81,26 @@ func (a *Account) ClearDownloadLinks() {
 func (a *Account) DownloadLinksCount() int {
 	return a.links.Size()
 }
+
+// GetRandomLink returns any cached download link for speed testing
+// Returns empty link if no links are cached
+func (a *Account) GetRandomLink() (types.DownloadLink, bool) {
+	var result types.DownloadLink
+	found := false
+	a.links.Range(func(_ string, link types.DownloadLink) bool {
+		if !link.Empty() {
+			result = link
+			found = true
+			return false // stop iteration
+		}
+		return true
+	})
+	return result, found
+}
+
 func (a *Account) StoreDownloadLinks(dls map[string]*types.DownloadLink) {
 	for _, dl := range dls {
-		a.StoreDownloadLink(*dl)
+		a.storeLink(*dl)
 	}
 }
 
@@ -84,36 +113,4 @@ func (a *Account) MarkDisabled() {
 func (a *Account) Reset() {
 	a.DisableCount.Store(0)
 	a.Disabled.Store(false)
-}
-
-func (a *Account) CheckBandwidth() error {
-	// Get a one of the download links to check if the account is still valid
-	downloadLink := ""
-	a.links.Range(func(key string, dl types.DownloadLink) bool {
-		if dl.DownloadLink != "" {
-			downloadLink = dl.DownloadLink
-			return false
-		}
-		return true
-	})
-	if downloadLink == "" {
-		return fmt.Errorf("no download link found")
-	}
-
-	// Let's check the download link status
-	req, err := http.NewRequest(http.MethodGet, downloadLink, nil)
-	if err != nil {
-		return err
-	}
-	// Use a simple client
-	client := http.DefaultClient
-	resp, err := client.Do(req)
-	if err != nil {
-		return err
-	}
-	defer resp.Body.Close()
-	if resp.StatusCode != http.StatusOK && resp.StatusCode != http.StatusPartialContent {
-		return fmt.Errorf("account check failed with status code %d", resp.StatusCode)
-	}
-	return nil
 }

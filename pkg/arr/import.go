@@ -1,12 +1,10 @@
 package arr
 
 import (
-	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	gourl "net/url"
-	"strconv"
 	"time"
 )
 
@@ -115,6 +113,8 @@ type ImportResponseSchema struct {
 }
 
 type ManualImportRequestFile struct {
+	DownloadId   string `json:"downloadId"`
+	FolderName   string `json:"folderName"`
 	Path         string `json:"path"`
 	SeriesId     int    `json:"seriesId"`
 	SeasonNumber int    `json:"seasonNumber"`
@@ -153,31 +153,25 @@ type ManualImportRequestSchema struct {
 	ImportMode string                    `json:"importMode"`
 }
 
-func (a *Arr) Import(path string, seriesId int, seasons []int) (io.ReadCloser, error) {
+func (a *Arr) Import(downloadID string) (io.ReadCloser, error) {
 	query := gourl.Values{}
-	query.Add("folder", path)
-	if seriesId != 0 {
-		query.Add("seriesId", strconv.Itoa(seriesId))
-	}
+	query.Add("downloadId", downloadID)
 	url := "api/v3/manualimport" + "?" + query.Encode()
-	resp, err := a.Request(http.MethodGet, url, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to import, invalid file: %w", err)
-	}
-	defer resp.Body.Close()
 	var data []ImportResponseSchema
-	if err = json.NewDecoder(resp.Body).Decode(&data); err != nil {
-		return nil, fmt.Errorf("failed to decode response: %w", err)
+	_, err := a.Request(http.MethodGet, url, nil, &data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to import: %w", err)
 	}
-
 	var files []ManualImportRequestFile
 	for _, d := range data {
-		episodesIds := []int{}
+		var episodesIds []int
 		for _, e := range d.Episodes {
 			episodesIds = append(episodesIds, e.Id)
 		}
 		file := ManualImportRequestFile{
+			DownloadId:        downloadID,
 			Path:              d.Path,
+			FolderName:        d.FolderName,
 			SeriesId:          d.Series.Id,
 			SeasonNumber:      d.SeasonNumber,
 			EpisodeIds:        episodesIds,
@@ -192,6 +186,7 @@ func (a *Arr) Import(path string, seriesId int, seasons []int) (io.ReadCloser, e
 		}
 		files = append(files, file)
 	}
+
 	request := ManualImportRequestSchema{
 		Name:       "ManualImport",
 		Files:      files,
@@ -199,10 +194,9 @@ func (a *Arr) Import(path string, seriesId int, seasons []int) (io.ReadCloser, e
 	}
 
 	url = "api/v3/command"
-	resp, err = a.Request(http.MethodPost, url, request)
+	resp, err := a.Request(http.MethodPost, url, request, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to import: %w", err)
 	}
-	defer resp.Body.Close()
 	return resp.Body, nil
 }

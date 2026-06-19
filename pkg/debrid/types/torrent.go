@@ -1,13 +1,10 @@
 package types
 
 import (
-	"fmt"
 	"os"
-	"path/filepath"
 	"sync"
 	"time"
 
-	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 )
@@ -16,20 +13,18 @@ type Torrent struct {
 	Id               string          `json:"id"`
 	InfoHash         string          `json:"info_hash"`
 	Name             string          `json:"name"`
-	Folder           string          `json:"folder"`
 	Filename         string          `json:"filename"`
 	OriginalFilename string          `json:"original_filename"`
 	Size             int64           `json:"size"`
 	Bytes            int64           `json:"bytes"` // Size of only the files that are downloaded
 	Magnet           *utils.Magnet   `json:"magnet"`
 	Files            map[string]File `json:"files"`
-	Status           string          `json:"status"`
-	Added            string          `json:"added"`
+	Status           TorrentStatus   `json:"status"`
+	Added            time.Time       `json:"added"`
 	Progress         float64         `json:"progress"`
 	Speed            int64           `json:"speed"`
 	Seeders          int             `json:"seeders"`
 	Links            []string        `json:"links"`
-	MountPath        string          `json:"mount_path"`
 	DeletedFiles     []string        `json:"deleted_files"`
 
 	Debrid string `json:"debrid"`
@@ -40,6 +35,13 @@ type Torrent struct {
 	DownloadUncached bool  `json:"-"`
 
 	sync.Mutex
+}
+
+func (t *Torrent) GetSize() int64 {
+	if t.Size == 0 {
+		return t.Bytes
+	}
+	return t.Size
 }
 
 func (t *Torrent) Copy() *Torrent {
@@ -55,7 +57,6 @@ func (t *Torrent) Copy() *Torrent {
 		Id:               t.Id,
 		InfoHash:         t.InfoHash,
 		Name:             t.Name,
-		Folder:           t.Folder,
 		Filename:         t.Filename,
 		OriginalFilename: t.OriginalFilename,
 		Size:             t.Size,
@@ -68,33 +69,9 @@ func (t *Torrent) Copy() *Torrent {
 		Speed:            t.Speed,
 		Seeders:          t.Seeders,
 		Links:            append([]string{}, t.Links...),
-		MountPath:        t.MountPath,
 		Debrid:           t.Debrid,
 		Arr:              t.Arr,
 	}
-}
-
-func (t *Torrent) GetSymlinkFolder(parent string) string {
-	return filepath.Join(parent, t.Arr.Name, t.Folder)
-}
-
-func (t *Torrent) GetMountFolder(rClonePath string) (string, error) {
-	_log := logger.Default()
-	possiblePaths := []string{
-		t.OriginalFilename,
-		t.Filename,
-		utils.RemoveExtension(t.OriginalFilename),
-	}
-
-	for _, path := range possiblePaths {
-		_p := filepath.Join(rClonePath, path)
-		_log.Trace().Msgf("Checking path: %s", _p)
-		_, err := os.Stat(_p)
-		if !os.IsNotExist(err) {
-			return path, nil
-		}
-	}
-	return "", fmt.Errorf("no path found")
 }
 
 func (t *Torrent) GetFile(filename string) (File, bool) {
@@ -107,6 +84,7 @@ func (t *Torrent) GetFile(filename string) (File, bool) {
 
 func (t *Torrent) GetFiles() []File {
 	files := make([]File, 0, len(t.Files))
+
 	for _, f := range t.Files {
 		if !f.Deleted {
 			files = append(files, f)
@@ -153,9 +131,10 @@ type LibraryStats struct {
 }
 
 type Stats struct {
-	Profile  *Profile         `json:"profile"`
-	Library  LibraryStats     `json:"library"`
-	Accounts []map[string]any `json:"accounts"`
+	Profile         *Profile         `json:"profile"`
+	Library         LibraryStats     `json:"library"`
+	Accounts        []map[string]any `json:"accounts"`
+	SpeedTestResult *SpeedTestResult `json:"speed_test_result,omitempty"`
 }
 
 type Profile struct {
@@ -185,6 +164,12 @@ func (dl *DownloadLink) Valid() error {
 	if dl.Empty() {
 		return EmptyDownloadLinkError
 	}
+
+	// Validate url format
+	if !utils.IsValidURL(dl.DownloadLink) {
+		return InvalidDownloadLinkError
+	}
+
 	return nil
 }
 
@@ -194,4 +179,14 @@ func (dl *DownloadLink) Empty() bool {
 
 func (dl *DownloadLink) String() string {
 	return dl.DownloadLink
+}
+
+// SpeedTestResult holds the result of a debrid provider speed test
+type SpeedTestResult struct {
+	Provider  string    `json:"provider"`
+	SpeedMBps float64   `json:"speed_mbps"`
+	LatencyMs int64     `json:"latency_ms"`
+	BytesRead int64     `json:"bytes_read"`
+	TestedAt  time.Time `json:"tested_at"`
+	Error     string    `json:"error,omitempty"`
 }

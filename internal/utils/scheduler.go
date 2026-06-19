@@ -2,11 +2,12 @@ package utils
 
 import (
 	"fmt"
-	"github.com/go-co-op/gocron/v2"
-	"github.com/robfig/cron/v3"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/go-co-op/gocron/v2"
+	"github.com/robfig/cron/v3"
 )
 
 // ConvertToJobDef converts a string interval to a gocron.JobDefinition.
@@ -25,7 +26,7 @@ func ConvertToJobDef(interval string) (gocron.JobDefinition, error) {
 		return gocron.CronJob(interval, false), nil
 	}
 
-	if dur, err := time.ParseDuration(interval); err == nil {
+	if dur, err := ParseDuration(interval); err == nil {
 		return gocron.DurationJob(dur), nil
 	}
 

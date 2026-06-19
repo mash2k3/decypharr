@@ -52,3 +52,15 @@ type UserInfo APIResponse[struct {
 	Points       int    `json:"pts"`
 	Trafficshare int    `json:"trafficshare"`
 }]
+
+type DownloadLinksResponse APIResponse[[]struct {
+	Created     int64  `json:"created"`
+	Id          string `json:"id"`
+	Name        string `json:"name"`
+	Url         string `json:"url"`
+	DownloadUrl string `json:"downloadUrl"`
+	Expired     bool   `json:"expired"`
+	Chunk       int    `json:"chunk"`
+	Host        string `json:"host"`
+	Size        int    `json:"size"`
+}]

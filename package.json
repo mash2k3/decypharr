@@ -3,7 +3,7 @@
   "version": "1.0.0",
   "description": "Media management tool",
   "scripts": {
-    "build-css": "tailwindcss -i ./pkg/web/assets/styles.css -o ./pkg/web/assets/build/css/styles.css --minify",
+    "build-css": "npx @tailwindcss/cli --input pkg/server/assets/styles.css --output ./pkg/server/assets/build/css/styles.css --minify",
     "minify-js": "node scripts/minify-js.js",
     "download-assets": "node scripts/download-assets.js",
     "build": "npm run build-css && npm run minify-js",
@@ -11,9 +11,10 @@
     "dev": "npm run build && air"
   },
   "devDependencies": {
-    "tailwindcss": "^3.4.0",
-    "daisyui": "^4.12.10",
-    "terser": "^5.24.0",
-    "clean-css": "^5.3.3"
+    "@tailwindcss/postcss": "^4.0.0",
+    "clean-css": "^5.3.3",
+    "daisyui": "^5.4.2",
+    "tailwindcss": "^4.0.0",
+    "terser": "^5.24.0"
   }
 }
