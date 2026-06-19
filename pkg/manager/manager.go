@@ -385,6 +385,9 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	go func() {
 		m.syncTorrents(ctx)
+		// Clear Bad flags only for entries that are healthy on RD (downloaded).
+		// Genuinely broken entries (hoster unavailable, dead) stay Bad.
+		m.clearBadFlagsForHealthyTorrents()
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
@@ -606,6 +609,48 @@ func (m *Manager) ClearBadFlag(infohash string) {
 		return
 	}
 	m.logger.Info().Str("infohash", infohash).Str("name", entry.Name).Msg("Cleared Bad flag after re-insertion sync")
+}
+
+// clearBadFlagsForHealthyTorrents clears Bad=false only for entries whose
+// infohash is present on the debrid provider as a downloaded torrent.
+// Called on startup so re-inserted torrents recover automatically after restart.
+func (m *Manager) clearBadFlagsForHealthyTorrents() {
+	// Build set of downloaded infohashes from all providers
+	healthyHashes := make(map[string]bool)
+	m.clients.Range(func(_ string, client debrid.Client) bool {
+		torrents, err := client.GetTorrents()
+		if err != nil {
+			return true
+		}
+		for _, t := range torrents {
+			if t.InfoHash != "" {
+				healthyHashes[t.InfoHash] = true
+			}
+		}
+		return true
+	})
+	if len(healthyHashes) == 0 {
+		return
+	}
+	cleared := 0
+	_ = m.storage.ForEach(func(entry *storage.Entry) error {
+		if !entry.Bad {
+			return nil
+		}
+		if !healthyHashes[entry.InfoHash] {
+			return nil // Not on RD as downloaded — leave Bad=true
+		}
+		entry.Bad = false
+		if err := m.storage.AddOrUpdate(entry); err != nil {
+			return nil
+		}
+		m.logger.Info().Str("infohash", entry.InfoHash).Str("name", entry.Name).Msg("Cleared Bad flag on startup (torrent healthy on RD)")
+		cleared++
+		return nil
+	})
+	if cleared > 0 {
+		m.logger.Info().Int("cleared", cleared).Msg("Cleared Bad flags for healthy torrents on startup")
+	}
 }
 
 // ClearAllBadFlags resets Bad=false for every entry in storage.
