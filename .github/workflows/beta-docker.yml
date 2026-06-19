@@ -9,12 +9,17 @@ permissions:
   contents: read
   packages: write
 
+env:
+  GHCR_IMAGE: ghcr.io/mash2k3/decypharr
+
 jobs:
-  docker:
+  prepare:
     runs-on: ubuntu-latest
+    outputs:
+      beta_version: ${{ steps.calculate_version.outputs.beta_version }}
     steps:
       - name: Checkout repository
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
         with:
           fetch-depth: 0
 
@@ -22,18 +27,30 @@ jobs:
         id: calculate_version
         run: |
           LATEST_TAG=$(git tag | grep -v 'beta' | sort -V | tail -n1)
-          echo "Found latest tag: ${LATEST_TAG}"
-          
           IFS='.' read -r -a VERSION_PARTS <<< "$LATEST_TAG"
           MAJOR="${VERSION_PARTS[0]}"
           MINOR="${VERSION_PARTS[1]}"
           PATCH="${VERSION_PARTS[2]}"
-          
           NEW_PATCH=$((PATCH + 1))
           BETA_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}"
-          
-          echo "Calculated beta version: ${BETA_VERSION}"
-          echo "beta_version=${BETA_VERSION}" >> $GITHUB_ENV
+          echo "beta_version=${BETA_VERSION}" >> $GITHUB_OUTPUT
+
+  build:
+    needs: prepare
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+    steps:
+      - name: Prepare platform pair
+        run: |
+          platform=${{ matrix.platform }}
+          echo "PLATFORM_PAIR=${platform//\//-}" >> $GITHUB_ENV
+
+      - name: Checkout repository
+        uses: actions/checkout@v5
 
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
@@ -41,22 +58,6 @@ jobs:
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
-      - name: Cache Docker layers
-        uses: actions/cache@v3
-        with:
-          path: /tmp/.buildx-cache
-          key: ${{ runner.os }}-buildx-${{ github.sha }}
-          restore-keys: |
-            ${{ runner.os }}-buildx-
-
-      # Login to Docker Hub
-      - name: Login to Docker Hub
-        uses: docker/login-action@v3
-        with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
-
-      # Login to GitHub Container Registry
       - name: Login to GitHub Container Registry
         uses: docker/login-action@v3
         with:
@@ -64,22 +65,57 @@ jobs:
           username: ${{ github.repository_owner }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push beta Docker image
-        uses: docker/build-push-action@v5
+      - name: Build and push by digest
+        id: build_ghcr
+        uses: docker/build-push-action@v6
         with:
           context: .
-          platforms: linux/amd64,linux/arm64,linux/arm/v7
-          push: true
-          tags: |
-            cy01/blackhole:beta
-            ghcr.io/${{ github.repository_owner }}/decypharr:beta
-          cache-from: type=local,src=/tmp/.buildx-cache
-          cache-to: type=local,dest=/tmp/.buildx-cache-new,mode=max
+          platforms: ${{ matrix.platform }}
           build-args: |
-            VERSION=${{ env.beta_version }}
+            VERSION=${{ needs.prepare.outputs.beta_version }}
             CHANNEL=beta
+          cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
+          cache-to: type=gha,scope=build-${{ env.PLATFORM_PAIR }},mode=max
+          outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
 
-      - name: Move cache
+      - name: Export digest
         run: |
-          rm -rf /tmp/.buildx-cache
-          mv /tmp/.buildx-cache-new /tmp/.buildx-cache
+          mkdir -p /tmp/digests/ghcr
+          ghcr_digest="${{ steps.build_ghcr.outputs.digest }}"
+          touch "/tmp/digests/ghcr/${ghcr_digest#sha256:}"
+
+      - name: Upload digest
+        uses: actions/upload-artifact@v4
+        with:
+          name: digests-ghcr-${{ env.PLATFORM_PAIR }}
+          path: /tmp/digests/ghcr/*
+          if-no-files-found: error
+          retention-days: 1
+
+  merge:
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - name: Download digests
+        uses: actions/download-artifact@v4
+        with:
+          path: /tmp/digests/ghcr
+          pattern: digests-ghcr-*
+          merge-multiple: true
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.repository_owner }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Create manifest and push
+        working-directory: /tmp/digests/ghcr
+        run: |
+          docker buildx imagetools create \
+            --tag ${{ env.GHCR_IMAGE }}:beta \
+            $(printf '${{ env.GHCR_IMAGE }}@sha256:%s ' *)
