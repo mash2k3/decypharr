@@ -391,6 +391,8 @@ func (m *Manager) Start(ctx context.Context) error {
 		// Clear Bad flags only for entries that are healthy on RD (downloaded).
 		// Genuinely broken entries (hoster unavailable, dead) stay Bad.
 		m.clearBadFlagsForHealthyTorrents()
+		// Remove ghost entries — raw-RD-named duplicates of CLI-renamed entries.
+		m.deleteGhostEntries()
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
@@ -653,6 +655,100 @@ func (m *Manager) clearBadFlagsForHealthyTorrents() {
 	})
 	if cleared > 0 {
 		m.logger.Info().Int("cleared", cleared).Msg("Cleared Bad flags for healthy torrents on startup")
+	}
+}
+
+// deleteGhostEntries finds torrent entries that share a folder name (EntryItem)
+// with a CLI-renamed entry and deletes the raw-named duplicate from both
+// Decypharr storage and RD. Called once on startup after syncTorrents.
+//
+// An entry is a ghost if:
+//   - It shares a folder name with another entry
+//   - It has NO files with OriginalName set (never CLI-renamed)
+//   - The other entry DOES have OriginalName set (was CLI-renamed)
+func (m *Manager) deleteGhostEntries() {
+	deleted := 0
+	_ = m.storage.ForEachEntryItem(func(item *storage.EntryItem) error {
+		if item == nil {
+			return nil
+		}
+		// Collect all unique infohashes for this folder
+		hashSet := make(map[string]struct{})
+		for _, f := range item.Files {
+			if f != nil && f.InfoHash != "" {
+				hashSet[f.InfoHash] = struct{}{}
+			}
+		}
+		if len(hashSet) < 2 {
+			return nil // Only one entry for this folder — no duplicate
+		}
+
+		// Load all entries for this folder
+		type entryScore struct {
+			entry      *storage.Entry
+			hasRenamed bool // has at least one file with OriginalName set
+		}
+		var candidates []entryScore
+		for hash := range hashSet {
+			e, err := m.storage.Get(hash)
+			if err != nil || e == nil || e.Protocol != "torrent" {
+				continue
+			}
+			hasRenamed := false
+			for _, f := range e.Files {
+				if f != nil && f.OriginalName != "" {
+					hasRenamed = true
+					break
+				}
+			}
+			candidates = append(candidates, entryScore{entry: e, hasRenamed: hasRenamed})
+		}
+		if len(candidates) < 2 {
+			return nil
+		}
+
+		// Find the CLI-renamed entry (has OriginalName)
+		var primary *storage.Entry
+		for _, c := range candidates {
+			if c.hasRenamed {
+				primary = c.entry
+				break
+			}
+		}
+		if primary == nil {
+			return nil // None are CLI-renamed — don't touch
+		}
+
+		// Delete all non-renamed entries (ghosts)
+		for _, c := range candidates {
+			if c.entry.InfoHash == primary.InfoHash {
+				continue
+			}
+			if c.hasRenamed {
+				continue // Both renamed — don't touch either
+			}
+			// This is a ghost — delete from RD and storage
+			client := m.ProviderClient(c.entry.ActiveProvider)
+			if client != nil {
+				placement := c.entry.GetActiveProvider()
+				if placement != nil && placement.ID != "" {
+					if err := client.DeleteTorrent(placement.ID); err != nil {
+						m.logger.Debug().Err(err).Str("name", c.entry.Name).Msg("Failed to delete ghost torrent from RD")
+					} else {
+						m.logger.Info().Str("name", c.entry.Name).Str("infohash", c.entry.InfoHash).Msg("Deleted ghost torrent from RD")
+					}
+				}
+			}
+			if err := m.storage.Delete(c.entry.InfoHash); err != nil {
+				m.logger.Warn().Err(err).Str("infohash", c.entry.InfoHash).Msg("Failed to delete ghost entry from storage")
+			} else {
+				deleted++
+			}
+		}
+		return nil
+	})
+	if deleted > 0 {
+		m.logger.Info().Int("deleted", deleted).Msg("Deleted ghost torrent entries on startup")
 	}
 }
 

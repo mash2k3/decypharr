@@ -459,10 +459,20 @@ func (m *Manager) refreshTorrentByRdID(infohash string, rdID string) (*storage.E
 		return nil, err
 	}
 	if entry != nil {
+		// Preserve CLI-renamed filenames and folder name from the existing entry.
+		// processSyncTorrent creates a fresh entry with RD's raw names — we must
+		// merge back the CLI names so the mount always shows the renamed version.
+		if existing != nil {
+			entry = storage.HandleExistingEntryMerge(existing, entry)
+			// Preserve the CLI folder name if it was renamed
+			if existing.Name != "" && existing.Name != existing.OriginalFilename {
+				entry.Name = existing.Name
+			}
+		}
 		if err := m.storage.AddOrUpdate(entry); err != nil {
 			return nil, err
 		}
-		m.logger.Info().Str("infohash", infohash).Str("rdId", rdID).Bool("bad", entry.Bad).Msg("refreshTorrentByRdID: saved entry")
+		m.logger.Info().Str("infohash", infohash).Str("rdId", rdID).Bool("bad", entry.Bad).Str("name", entry.Name).Msg("refreshTorrentByRdID: saved entry")
 	} else {
 		m.logger.Warn().Str("infohash", infohash).Str("rdId", rdID).Msg("refreshTorrentByRdID: processSyncTorrent returned nil")
 	}
