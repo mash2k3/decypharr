@@ -385,10 +385,6 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	go func() {
 		m.syncTorrents(ctx)
-		// Clear any Bad flags left over from previous repair attempts
-		if cleared := m.ClearAllBadFlags(); cleared > 0 {
-			m.logger.Info().Int("cleared", cleared).Msg("Cleared Bad flags on startup")
-		}
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
