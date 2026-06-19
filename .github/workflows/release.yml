@@ -233,4 +233,5 @@ jobs:
             --title "decypharr ${TAG}" \
             --generate-notes \
             $PRERELEASE \
+            --clobber \
             --notes-start-tag "$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")"
