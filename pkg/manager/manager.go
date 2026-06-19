@@ -686,7 +686,7 @@ func (m *Manager) deleteGhostEntries() {
 		// Load all entries for this folder
 		type entryScore struct {
 			entry      *storage.Entry
-			hasRenamed bool // has at least one file with OriginalName set
+			hasRenamed bool // entry was explicitly renamed by CLI (Name != OriginalFilename)
 		}
 		var candidates []entryScore
 		for hash := range hashSet {
@@ -694,13 +694,9 @@ func (m *Manager) deleteGhostEntries() {
 			if err != nil || e == nil || e.Protocol != "torrent" {
 				continue
 			}
-			hasRenamed := false
-			for _, f := range e.Files {
-				if f != nil && f.OriginalName != "" {
-					hasRenamed = true
-					break
-				}
-			}
+			// CLI rename sets entry.Name to a different value than entry.OriginalFilename.
+			// OriginalFilename is the raw RD torrent name; Name is what CLI renamed it to.
+			hasRenamed := e.Name != "" && e.OriginalFilename != "" && e.Name != e.OriginalFilename
 			candidates = append(candidates, entryScore{entry: e, hasRenamed: hasRenamed})
 		}
 		if len(candidates) < 2 {
