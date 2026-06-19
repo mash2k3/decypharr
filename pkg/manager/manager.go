@@ -658,21 +658,22 @@ func (m *Manager) clearBadFlagsForHealthyTorrents() {
 	}
 }
 
-// deleteGhostEntries finds torrent entries that share a folder name (EntryItem)
-// with a CLI-renamed entry and deletes the raw-named duplicate from both
-// Decypharr storage and RD. Called once on startup after syncTorrents.
+// deleteGhostEntries removes ghost torrent entries — raw-RD-named duplicates of
+// CLI-renamed entries. Two cases handled:
 //
-// An entry is a ghost if:
-//   - It shares a folder name with another entry
-//   - It has NO files with OriginalName set (never CLI-renamed)
-//   - The other entry DOES have OriginalName set (was CLI-renamed)
+//  1. Entries sharing the same EntryItem folder name where one is CLI-renamed
+//     and the other is not (same content, different folder name format).
+//
+//  2. Broken entries with raw RD filenames whose exact file size matches a
+//     healthy CLI-renamed entry (ghost created by old Decypharr self-repair).
 func (m *Manager) deleteGhostEntries() {
 	deleted := 0
+
+	// Case 1: entries sharing same EntryItem folder name
 	_ = m.storage.ForEachEntryItem(func(item *storage.EntryItem) error {
 		if item == nil {
 			return nil
 		}
-		// Collect all unique infohashes for this folder
 		hashSet := make(map[string]struct{})
 		for _, f := range item.Files {
 			if f != nil && f.InfoHash != "" {
@@ -680,13 +681,12 @@ func (m *Manager) deleteGhostEntries() {
 			}
 		}
 		if len(hashSet) < 2 {
-			return nil // Only one entry for this folder — no duplicate
+			return nil
 		}
 
-		// Load all entries for this folder
 		type entryScore struct {
 			entry      *storage.Entry
-			hasRenamed bool // entry was explicitly renamed by CLI (Name != OriginalFilename)
+			hasRenamed bool
 		}
 		var candidates []entryScore
 		for hash := range hashSet {
@@ -694,8 +694,6 @@ func (m *Manager) deleteGhostEntries() {
 			if err != nil || e == nil || e.Protocol != "torrent" {
 				continue
 			}
-			// CLI rename sets entry.Name to a different value than entry.OriginalFilename.
-			// OriginalFilename is the raw RD torrent name; Name is what CLI renamed it to.
 			hasRenamed := e.Name != "" && e.OriginalFilename != "" && e.Name != e.OriginalFilename
 			candidates = append(candidates, entryScore{entry: e, hasRenamed: hasRenamed})
 		}
@@ -703,7 +701,6 @@ func (m *Manager) deleteGhostEntries() {
 			return nil
 		}
 
-		// Find the CLI-renamed entry (has OriginalName)
 		var primary *storage.Entry
 		for _, c := range candidates {
 			if c.hasRenamed {
@@ -712,39 +709,89 @@ func (m *Manager) deleteGhostEntries() {
 			}
 		}
 		if primary == nil {
-			return nil // None are CLI-renamed — don't touch
+			return nil
 		}
 
-		// Delete all non-renamed entries (ghosts)
 		for _, c := range candidates {
-			if c.entry.InfoHash == primary.InfoHash {
+			if c.entry.InfoHash == primary.InfoHash || c.hasRenamed {
 				continue
 			}
-			if c.hasRenamed {
-				continue // Both renamed — don't touch either
-			}
-			// This is a ghost — delete from RD and storage
-			client := m.ProviderClient(c.entry.ActiveProvider)
-			if client != nil {
-				placement := c.entry.GetActiveProvider()
-				if placement != nil && placement.ID != "" {
-					if err := client.DeleteTorrent(placement.ID); err != nil {
-						m.logger.Debug().Err(err).Str("name", c.entry.Name).Msg("Failed to delete ghost torrent from RD")
-					} else {
-						m.logger.Info().Str("name", c.entry.Name).Str("infohash", c.entry.InfoHash).Msg("Deleted ghost torrent from RD")
-					}
-				}
-			}
-			if err := m.storage.Delete(c.entry.InfoHash); err != nil {
-				m.logger.Warn().Err(err).Str("infohash", c.entry.InfoHash).Msg("Failed to delete ghost entry from storage")
-			} else {
-				deleted++
+			m.deleteEntryAndRDTorrent(c.entry, &deleted)
+		}
+		return nil
+	})
+
+	// Case 2: broken entries with raw names whose file size matches a healthy CLI entry
+	// Build a size map of all healthy CLI-renamed entries
+	type cliEntry struct {
+		name string
+		hash string
+	}
+	cliSizeMap := make(map[int64]cliEntry)
+	_ = m.storage.ForEach(func(e *storage.Entry) error {
+		if e.Protocol != "torrent" {
+			return nil
+		}
+		if e.Name == "" || e.OriginalFilename == "" || e.Name == e.OriginalFilename {
+			return nil // not CLI-renamed
+		}
+		for _, f := range e.Files {
+			if f != nil && f.Size > 0 {
+				cliSizeMap[f.Size] = cliEntry{name: e.Name, hash: e.InfoHash}
 			}
 		}
 		return nil
 	})
+
+	if len(cliSizeMap) > 0 {
+		_ = m.storage.ForEach(func(e *storage.Entry) error {
+			if e.Protocol != "torrent" {
+				return nil
+			}
+			// Only target raw-named broken entries
+			if e.Name == "" || e.OriginalFilename == "" || e.Name != e.OriginalFilename {
+				return nil
+			}
+			// Check if any file size matches a CLI-renamed entry
+			for _, f := range e.Files {
+				if f == nil || f.Size == 0 {
+					continue
+				}
+				if cli, ok := cliSizeMap[f.Size]; ok && cli.hash != e.InfoHash {
+					m.logger.Info().
+						Str("ghost", e.Name).
+						Str("cli_entry", cli.name).
+						Msg("Ghost entry detected by file size match with CLI-renamed entry")
+					m.deleteEntryAndRDTorrent(e, &deleted)
+					return nil // done with this entry
+				}
+			}
+			return nil
+		})
+	}
+
 	if deleted > 0 {
 		m.logger.Info().Int("deleted", deleted).Msg("Deleted ghost torrent entries on startup")
+	}
+}
+
+// deleteEntryAndRDTorrent deletes a ghost entry from RD and Decypharr storage.
+func (m *Manager) deleteEntryAndRDTorrent(e *storage.Entry, count *int) {
+	client := m.ProviderClient(e.ActiveProvider)
+	if client != nil {
+		placement := e.GetActiveProvider()
+		if placement != nil && placement.ID != "" {
+			if err := client.DeleteTorrent(placement.ID); err != nil {
+				m.logger.Debug().Err(err).Str("name", e.Name).Msg("Failed to delete ghost torrent from RD")
+			} else {
+				m.logger.Info().Str("name", e.Name).Str("infohash", e.InfoHash).Msg("Deleted ghost torrent from RD")
+			}
+		}
+	}
+	if err := m.storage.Delete(e.InfoHash); err != nil {
+		m.logger.Warn().Err(err).Str("infohash", e.InfoHash).Msg("Failed to delete ghost entry from storage")
+	} else {
+		*count++
 	}
 }
 
