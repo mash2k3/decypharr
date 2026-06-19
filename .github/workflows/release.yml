@@ -256,9 +256,13 @@ jobs:
             PRERELEASE="--prerelease"
           fi
 
-          gh release create "$TAG" dist/* \
-            --title "decypharr ${TAG}" \
-            --generate-notes \
-            $PRERELEASE \
-            --clobber \
-            --notes-start-tag "$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")"
+          # Create release if it doesn't exist, otherwise just upload assets
+          if gh release view "$TAG" &>/dev/null; then
+            gh release upload "$TAG" dist/* --clobber
+          else
+            gh release create "$TAG" dist/* \
+              --title "decypharr ${TAG}" \
+              --generate-notes \
+              $PRERELEASE \
+              --notes-start-tag "$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")"
+          fi
