@@ -2,6 +2,8 @@ name: Release
 
 on:
   push:
+    branches:
+      - main
     tags:
       - 'v*'
 
@@ -19,20 +21,34 @@ jobs:
     outputs:
       version: ${{ steps.meta.outputs.version }}
       channel: ${{ steps.meta.outputs.channel }}
+      tag: ${{ steps.meta.outputs.tag }}
     steps:
+      - uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
+
       - name: Extract version and channel
         id: meta
         run: |
-          TAG="${GITHUB_REF#refs/tags/}"
-          VERSION="${TAG#v}"
-          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
-          if [[ "$TAG" == *"-beta"* ]]; then
-            echo "channel=beta" >> "$GITHUB_OUTPUT"
-          elif [[ "$TAG" == *"-rc"* ]]; then
-            echo "channel=rc" >> "$GITHUB_OUTPUT"
+          if [[ "${GITHUB_REF}" == refs/tags/* ]]; then
+            TAG="${GITHUB_REF#refs/tags/}"
+            VERSION="${TAG#v}"
+            if [[ "$TAG" == *"-beta"* ]]; then
+              CHANNEL="beta"
+            elif [[ "$TAG" == *"-rc"* ]]; then
+              CHANNEL="rc"
+            else
+              CHANNEL="stable"
+            fi
           else
-            echo "channel=stable" >> "$GITHUB_OUTPUT"
+            # Push to main — use rolling "latest" release
+            TAG="latest"
+            VERSION="$(git describe --tags --abbrev=0 2>/dev/null || echo '0.0.0')-dev+$(git rev-parse --short HEAD)"
+            CHANNEL="stable"
           fi
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "channel=${CHANNEL}" >> "$GITHUB_OUTPUT"
 
   build-linux:
     runs-on: ubuntu-latest
@@ -202,7 +218,7 @@ jobs:
             VERSION=${{ needs.prepare.outputs.version }}
             CHANNEL=${{ needs.prepare.outputs.channel }}
           tags: |
-            ${{ env.REGISTRY_GHCR }}:${{ github.ref_name }}
+            ${{ env.REGISTRY_GHCR }}:${{ needs.prepare.outputs.tag }}
             ${{ env.REGISTRY_GHCR }}:latest
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -245,24 +261,24 @@ jobs:
           name: darwin-arm64
           path: dist
 
-      - name: Create release
+      - name: Create or update release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-          TAG: ${{ github.ref_name }}
+          TAG: ${{ needs.prepare.outputs.tag }}
           CHANNEL: ${{ needs.prepare.outputs.channel }}
+          VERSION: ${{ needs.prepare.outputs.version }}
         run: |
           PRERELEASE=""
           if [ "$CHANNEL" != "stable" ]; then
             PRERELEASE="--prerelease"
           fi
 
-          # Create release if it doesn't exist, otherwise just upload assets
           if gh release view "$TAG" &>/dev/null; then
             gh release upload "$TAG" dist/* --clobber
           else
             gh release create "$TAG" dist/* \
-              --title "decypharr ${TAG}" \
+              --title "decypharr ${VERSION}" \
               --generate-notes \
               $PRERELEASE \
-              --notes-start-tag "$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")"
+              --notes-start-tag "$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || echo "")"
           fi
