@@ -90,6 +90,7 @@ jobs:
         with:
           name: linux-${{ matrix.arch }}
           path: dist/decypharr_Linux_*.tar.gz
+          retention-days: 7
 
   build-windows:
     runs-on: ubuntu-latest
@@ -125,6 +126,7 @@ jobs:
         with:
           name: windows-amd64
           path: dist/decypharr_Windows_x86_64.zip
+          retention-days: 7
 
   build-darwin:
     runs-on: macos-latest
@@ -169,6 +171,7 @@ jobs:
         with:
           name: darwin-${{ matrix.arch }}
           path: dist/decypharr_Darwin_*.tar.gz
+          retention-days: 7
 
   docker:
     runs-on: ubuntu-latest
