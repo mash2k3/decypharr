@@ -71,15 +71,17 @@ func New(
 func (s *Service) GetLink(ctx context.Context, entry *storage.Entry, filename string) (types.DownloadLink, error) {
 	// Use singleflight to deduplicate concurrent requests for the same file
 	key := entry.InfoHash + ":" + filename
-	v, err, _ := s.singleflight.Do(key, func() (interface{}, error) {
-		// Recover from any panic in fetchAndValidate to prevent crashing Decypharr
+	v, err, _ := s.singleflight.Do(key, func() (any, error) {
+		// Recover from any panic in fetchAndValidate to prevent crashing Decypharr.
+		// Mark the entry as Bad so it stops being retried endlessly.
 		defer func() {
 			if r := recover(); r != nil {
 				s.logger.Error().
 					Str("infohash", entry.InfoHash).
 					Str("filename", filename).
 					Interface("panic", r).
-					Msg("Recovered panic in GetLink fetchAndValidate")
+					Msg("Recovered panic in GetLink — marking entry as Bad")
+				s.markEntryBad(entry, filename, 0, "panic_recovered")
 			}
 		}()
 		return s.fetchAndValidate(ctx, entry, filename, 0)
