@@ -159,6 +159,11 @@ func (s *Service) handleBadLink(ctx context.Context, err error, entry *storage.E
 		if entry.Bad {
 			return emptyDownloadLink, fmt.Errorf("can't repair %s since it's been marked as bad", entry.GetFolder())
 		}
+		if s.repairer == nil {
+			// No repairer configured — mark bad immediately so CLI can handle it
+			s.markEntryBad(entry, dl.Filename, attempt, "hoster_unavailable")
+			return emptyDownloadLink, fmt.Errorf("entry %s is broken (no repairer configured)", entry.GetFolder())
+		}
 		if attempt >= MaxReinsertionAttempt {
 			s.markEntryBad(entry, dl.Filename, attempt, "hoster_unavailable")
 			return emptyDownloadLink, fmt.Errorf("entry %s file %s still unresolvable after %d re-insertion attempts", entry.GetFolder(), dl.Filename, attempt)

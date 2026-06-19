@@ -251,10 +251,13 @@ func (m *Manager) initUsenet() {
 
 // initLinkService initializes the link service
 func (m *Manager) initLinkService() {
+	// Pass nil repairer — CLI handles torrent re-insertion via the debrid repair
+	// engine. Decypharr's own re-insertion creates ghost entries with raw RD
+	// filenames that break the CLI rename mapping.
 	m.linkService = link.New(
 		m.clients,
 		m.refreshTorrent,
-		m.ReinsertEntry,
+		nil,
 		func(entry *storage.Entry) error { return m.AddOrUpdate(entry, nil) },
 		m.streamClient,
 		m.config.Retries,
