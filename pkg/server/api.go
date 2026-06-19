@@ -438,13 +438,19 @@ func (s *Server) handleSyncTorrent(w http.ResponseWriter, r *http.Request) {
 		entry, err = s.manager.RefreshTorrent(hash)
 	}
 	if err != nil {
+		// Sync failed but still try to clear Bad flag — the entry may be healthy
+		// after re-insertion even if the sync RD fetch failed
+		s.manager.ClearBadFlag(hash)
 		http.Error(w, err.Error(), http.StatusInternalServerError)
 		return
 	}
 	if entry == nil {
+		s.manager.ClearBadFlag(hash)
 		http.Error(w, "torrent not found", http.StatusNotFound)
 		return
 	}
+	// Always clear Bad flag after a sync triggered by CLI re-insertion
+	s.manager.ClearBadFlag(hash)
 	s.manager.RefreshEntries(true)
 	utils.JSONResponse(w, map[string]string{"status": "synced", "name": entry.Name}, http.StatusOK)
 }

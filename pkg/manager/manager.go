@@ -385,6 +385,10 @@ func (m *Manager) Start(ctx context.Context) error {
 
 	go func() {
 		m.syncTorrents(ctx)
+		// Clear any Bad flags left over from previous repair attempts
+		if cleared := m.ClearAllBadFlags(); cleared > 0 {
+			m.logger.Info().Int("cleared", cleared).Msg("Cleared Bad flags on startup")
+		}
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
@@ -588,6 +592,44 @@ func (m *Manager) RefreshTorrentByRdID(infohash string, rdID string) (*storage.E
 
 func (m *Manager) EntryExists(infohash string) (bool, error) {
 	return m.storage.Exists(infohash)
+}
+
+// ClearBadFlag loads the entry from storage, clears Bad=false, and saves it back.
+// Called after CLI re-insertion so Decypharr doesn't block playback with "marked as bad".
+func (m *Manager) ClearBadFlag(infohash string) {
+	entry, err := m.storage.Get(infohash)
+	if err != nil || entry == nil {
+		return
+	}
+	if !entry.Bad {
+		return
+	}
+	entry.Bad = false
+	if err := m.storage.AddOrUpdate(entry); err != nil {
+		m.logger.Warn().Err(err).Str("infohash", infohash).Msg("Failed to clear Bad flag")
+		return
+	}
+	m.logger.Info().Str("infohash", infohash).Str("name", entry.Name).Msg("Cleared Bad flag after re-insertion sync")
+}
+
+// ClearAllBadFlags resets Bad=false for every entry in storage.
+// Called via API to recover all entries marked bad by failed repair attempts.
+func (m *Manager) ClearAllBadFlags() int {
+	cleared := 0
+	_ = m.storage.ForEach(func(entry *storage.Entry) error {
+		if !entry.Bad {
+			return nil
+		}
+		entry.Bad = false
+		if err := m.storage.AddOrUpdate(entry); err != nil {
+			m.logger.Warn().Err(err).Str("infohash", entry.InfoHash).Msg("Failed to clear Bad flag")
+			return nil
+		}
+		m.logger.Info().Str("infohash", entry.InfoHash).Str("name", entry.Name).Msg("Cleared Bad flag on bulk reset")
+		cleared++
+		return nil
+	})
+	return cleared
 }
 
 func (m *Manager) GetTorrents(filter func(*storage.Entry) bool) ([]*storage.Entry, error) {
