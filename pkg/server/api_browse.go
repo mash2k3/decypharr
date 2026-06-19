@@ -438,6 +438,54 @@ func (s *Server) handleRenameEntry(w http.ResponseWriter, r *http.Request) {
 	}
 	entry.Name = baseName
 
+	// Remove ghost duplicate files from entry.Files — same-size files where one
+	// is the original RD filename and the other is already the CLI-renamed name.
+	// This can happen when a re-insertion merges both names into entry.Files.
+	if len(entry.Files) == 2 {
+		sizes := make(map[int64][]string)
+		for k, f := range entry.Files {
+			sizes[f.Size] = append(sizes[f.Size], k)
+		}
+		for _, keys := range sizes {
+			if len(keys) == 2 {
+				// Two files with same size — keep the CLI-named one (has {imdb- or matches baseName)
+				k0, k1 := keys[0], keys[1]
+				isCliName := func(k string) bool {
+					return strings.Contains(k, "{imdb-") || strings.HasPrefix(k, baseName)
+				}
+				if isCliName(k0) && !isCliName(k1) {
+					// k0=CLI name, k1=original RD name
+					if f := entry.Files[k0]; f != nil && f.OriginalName == "" {
+						f.OriginalName = k1
+						entry.Files[k0] = f
+					}
+					delete(entry.Files, k1)
+					// Also rename k1→k0 in each ProviderEntry so placement.Files[cliName] has the link
+					for _, pe := range entry.Providers {
+						if pf, ok := pe.Files[k1]; ok {
+							delete(pe.Files, k1)
+							pe.Files[k0] = pf
+						}
+					}
+				} else if isCliName(k1) && !isCliName(k0) {
+					// k1=CLI name, k0=original RD name
+					if f := entry.Files[k1]; f != nil && f.OriginalName == "" {
+						f.OriginalName = k0
+						entry.Files[k1] = f
+					}
+					delete(entry.Files, k0)
+					// Also rename k0→k1 in each ProviderEntry so placement.Files[cliName] has the link
+					for _, pe := range entry.Providers {
+						if pf, ok := pe.Files[k0]; ok {
+							delete(pe.Files, k0)
+							pe.Files[k1] = pf
+						}
+					}
+				}
+			}
+		}
+	}
+
 	// Rename the file inside entry.Files only for single-file entries (movie or single episode)
 	// Season packs have multiple files — only rename the folder
 	if len(entry.Files) == 1 {

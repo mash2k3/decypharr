@@ -2,6 +2,7 @@ package manager
 
 import (
 	"context"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -333,10 +334,10 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 		}
 	}
 
-	addedOn := t.Added
-	if addedOn.IsZero() {
-		addedOn = time.Now()
-	}
+	// RD API returns local French time (CEST/CET) mislabeled as UTC — use local clock.
+	// For existing entries, storage preserves the original AddedOn set at add-time.
+	addedOn := time.Now()
+	_ = t.Added
 
 	// Check if we have an existing managed torrent
 	// Note: This is a database read per torrent - could be optimized with batch reads
@@ -375,7 +376,12 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 			CreatedAt:        addedOn,
 			UpdatedAt:        time.Now(),
 		}
+
 	}
+
+	// Clear Bad flag — a successful sync means the torrent is back on RD with a
+	// valid placement, so previous failure state is no longer relevant.
+	mt.Bad = false
 
 	// Populate global Files metadata (only if empty)
 	if len(mt.Files) == 0 {
@@ -412,6 +418,55 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 	}
 
 	return mt, nil
+}
+
+// refreshTorrentByRdID refreshes a torrent using an explicit RD torrent ID.
+// This bypasses the stale placement.ID stored after the old torrent broke —
+// after CLI re-insertion RD assigns a new ID; using the old one returns wrong data.
+func (m *Manager) refreshTorrentByRdID(infohash string, rdID string) (*storage.Entry, error) {
+	// Load existing entry (for renamed Files metadata)
+	existing, _ := m.storage.Get(infohash)
+
+	// Find the active provider client
+	var client debrid.Client
+	if existing != nil && existing.ActiveProvider != "" {
+		client = m.ProviderClient(existing.ActiveProvider)
+	}
+	if client == nil {
+		// Fall back to any available client
+		m.clients.Range(func(_ string, c debrid.Client) bool {
+			client = c
+			return false
+		})
+	}
+	if client == nil {
+		return nil, fmt.Errorf("no debrid client available")
+	}
+
+	// Fetch from RD using the NEW torrent ID
+	debridTorrent, err := client.GetTorrent(rdID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get torrent %s from RD: %w", rdID, err)
+	}
+
+	// Ensure infohash is set correctly
+	if debridTorrent.InfoHash == "" {
+		debridTorrent.InfoHash = infohash
+	}
+
+	entry, err := m.processSyncTorrent(debridTorrent)
+	if err != nil {
+		return nil, err
+	}
+	if entry != nil {
+		if err := m.storage.AddOrUpdate(entry); err != nil {
+			return nil, err
+		}
+		m.logger.Info().Str("infohash", infohash).Str("rdId", rdID).Bool("bad", entry.Bad).Msg("refreshTorrentByRdID: saved entry")
+	} else {
+		m.logger.Warn().Str("infohash", infohash).Str("rdId", rdID).Msg("refreshTorrentByRdID: processSyncTorrent returned nil")
+	}
+	return entry, nil
 }
 
 // refreshTorrent refreshes a single torrent from its active debrid

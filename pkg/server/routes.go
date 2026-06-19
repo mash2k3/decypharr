@@ -67,6 +67,7 @@ func (s *Server) WebRoutes() http.Handler {
 
 			// Torrent management
 			r.Get("/torrents", s.handleGetTorrents)
+			r.Post("/torrents/{hash}/sync", s.handleSyncTorrent)
 			r.Delete("/torrents/{category}/{hash}", s.handleDeleteTorrent)
 			r.Delete("/torrents", s.handleDeleteTorrents) // Fixed trailing slash
 

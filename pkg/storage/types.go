@@ -308,6 +308,47 @@ func (e *Entry) AddTorrentProvider(debridTorrent *debridTypes.Torrent) *Provider
 			Path: f.Path,
 		}
 	}
+
+	// Remap placement keys so the CLI-renamed filename resolves directly.
+	// Two cases:
+	// 1. OriginalName is set — use it to find the RD key and remap to CLI name.
+	// 2. OriginalName is empty — match by file size and auto-populate OriginalName.
+	for cliName, entryFile := range e.Files {
+		if entryFile.Deleted {
+			continue
+		}
+		if _, alreadyMapped := providerEntry.Files[cliName]; alreadyMapped {
+			continue // placement already has the CLI name as key
+		}
+		if entryFile.OriginalName != "" {
+			// Explicit OriginalName — remap directly
+			if pf, ok := providerEntry.Files[entryFile.OriginalName]; ok {
+				providerEntry.Files[cliName] = pf
+				delete(providerEntry.Files, entryFile.OriginalName)
+			}
+		} else if entryFile.Size > 0 {
+			// No OriginalName — find matching RD file by size and remap
+			for rdName, pf := range providerEntry.Files {
+				if rdName == cliName {
+					continue
+				}
+				// Find the corresponding RD file size from debridTorrent.GetFiles()
+				for _, df := range debridTorrent.GetFiles() {
+					if df.Name == rdName && df.Size == entryFile.Size {
+						entryFile.OriginalName = rdName
+						e.Files[cliName] = entryFile
+						providerEntry.Files[cliName] = pf
+						delete(providerEntry.Files, rdName)
+						break
+					}
+				}
+				if _, remapped := providerEntry.Files[cliName]; remapped {
+					break
+				}
+			}
+		}
+	}
+
 	e.Providers[debridTorrent.Debrid] = providerEntry
 	return providerEntry
 }

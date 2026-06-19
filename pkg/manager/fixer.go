@@ -302,13 +302,32 @@ func (f *Fixer) MoveTorrent(entry *storage.Entry, debridName string, reinsert bo
 			existing.InfoHash = entry.InfoHash
 			existing.AddedOn = addedOn
 		} else {
-			entry.Files[f.Name] = &storage.File{
-				Name:      f.Name,
-				Size:      f.Size,
-				ByteRange: f.ByteRange,
-				Deleted:   false,
-				InfoHash:  entry.InfoHash,
-				AddedOn:   addedOn,
+			// Before adding with the original RD filename, check if a renamed file
+			// with the same size already exists — if so, revive it to preserve the
+			// CLI rename and avoid creating a ghost duplicate.
+			var renamedKey string
+			for key, ef := range entry.Files {
+				if ef.Size == f.Size && key != f.Name {
+					renamedKey = key
+					break
+				}
+			}
+			if renamedKey != "" {
+				existing := entry.Files[renamedKey]
+				existing.Size = f.Size
+				existing.ByteRange = f.ByteRange
+				existing.Deleted = false
+				existing.InfoHash = entry.InfoHash
+				existing.AddedOn = addedOn
+			} else {
+				entry.Files[f.Name] = &storage.File{
+					Name:      f.Name,
+					Size:      f.Size,
+					ByteRange: f.ByteRange,
+					Deleted:   false,
+					InfoHash:  entry.InfoHash,
+					AddedOn:   addedOn,
+				}
 			}
 		}
 	}

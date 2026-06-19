@@ -315,10 +315,20 @@ func (s *Service) getPlacementFile(entry *storage.Entry, filename string) (*stor
 
 		file := refreshed.Files[filename]
 		if file == nil {
-			return nil, NewPermanentError(
-				fmt.Errorf("file disappeared after refresh"),
-				"file_disappeared",
-			)
+			// File not found by CLI name — check if the original entry has OriginalName
+			// set and if the refreshed entry has it under that key instead.
+			if origFile := entry.Files[filename]; origFile != nil && origFile.OriginalName != "" {
+				if rdFile := refreshed.Files[origFile.OriginalName]; rdFile != nil {
+					file = rdFile
+					filename = origFile.OriginalName
+				}
+			}
+		}
+		if file == nil {
+			// Treat as hoster unavailable so handleBadLink triggers re-insertion.
+			// This happens when the torrent was re-added to RD with a new ID and the
+			// renamed CLI filename no longer maps to any file in the refreshed entry.
+			return nil, customerror.HosterUnavailableError
 		}
 
 		placement = refreshed.Providers[entry.ActiveProvider]

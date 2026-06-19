@@ -418,6 +418,37 @@ func sortQueuedTorrents(torrents []*storage.Entry, sortBy, sortOrder string) {
 	sort.Slice(torrents, less)
 }
 
+// handleSyncTorrent triggers an immediate sync for a specific torrent by infohash.
+// Accepts optional ?rdId=<RD_torrent_ID> to fetch from RD using the new ID after
+// re-insertion, bypassing the stale placement ID stored in entries.db.
+func (s *Server) handleSyncTorrent(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+	if hash == "" {
+		http.Error(w, "hash required", http.StatusBadRequest)
+		return
+	}
+	rdID := r.URL.Query().Get("rdId")
+
+	var entry *storage.Entry
+	var err error
+
+	if rdID != "" {
+		entry, err = s.manager.RefreshTorrentByRdID(hash, rdID)
+	} else {
+		entry, err = s.manager.RefreshTorrent(hash)
+	}
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusInternalServerError)
+		return
+	}
+	if entry == nil {
+		http.Error(w, "torrent not found", http.StatusNotFound)
+		return
+	}
+	s.manager.RefreshEntries(true)
+	utils.JSONResponse(w, map[string]string{"status": "synced", "name": entry.Name}, http.StatusOK)
+}
+
 func (s *Server) handleDeleteTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 	removeFromDebrid := r.URL.Query().Get("removeFromDebrid") == "true"

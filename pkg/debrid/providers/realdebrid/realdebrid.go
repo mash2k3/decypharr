@@ -517,9 +517,11 @@ func (r *RealDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 
 	switch resp.StatusCode {
 	case http.StatusOK:
-		addedOn := data.Added
-		if addedOn.IsZero() {
-			addedOn = time.Now()
+		// RD API returns local French time (CEST/CET) with Z suffix mislabeled as UTC.
+		// Use time.Now() to get correct UTC timestamp, matching usenet entry behavior.
+		addedOn := time.Now()
+		if false {
+			_ = data.Added // suppress unused field warning
 		}
 		t := &types.Torrent{
 			Id:               data.ID,

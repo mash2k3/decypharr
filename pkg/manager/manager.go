@@ -574,6 +574,18 @@ func (m *Manager) GetEntry(infohash string) (*storage.Entry, error) {
 	return m.storage.Get(infohash)
 }
 
+// RefreshTorrent forces an immediate sync for a specific torrent by infohash.
+// Used after re-insertion to pick up the new RD ID without waiting for the 2-min sync cycle.
+func (m *Manager) RefreshTorrent(infohash string) (*storage.Entry, error) {
+	return m.refreshTorrent(infohash)
+}
+
+// RefreshTorrentByRdID syncs a torrent using a specific RD torrent ID, bypassing the
+// stale placement ID in storage. Used after CLI re-insertion when RD assigned a new ID.
+func (m *Manager) RefreshTorrentByRdID(infohash string, rdID string) (*storage.Entry, error) {
+	return m.refreshTorrentByRdID(infohash, rdID)
+}
+
 func (m *Manager) EntryExists(infohash string) (bool, error) {
 	return m.storage.Exists(infohash)
 }

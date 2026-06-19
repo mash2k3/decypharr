@@ -49,7 +49,9 @@ func mergeProviders(existing, incoming map[string]*ProviderEntry) map[string]*Pr
 	return merged
 }
 
-// mergeFiles merges two file maps, preferring files with newer AddedOn
+// mergeFiles merges two file maps, preferring files with newer AddedOn.
+// When an existing file was renamed (different key, same size), the renamed
+// version takes precedence over the incoming original-named version.
 func mergeFiles(existing, incoming map[string]*File) map[string]*File {
 	if existing == nil {
 		return incoming
@@ -65,15 +67,31 @@ func mergeFiles(existing, incoming map[string]*File) map[string]*File {
 		merged[k] = v
 	}
 
-	// Merge incoming files
+	// Build a size index of already-merged files to detect same-file duplicates
+	mergedSizes := make(map[int64]bool)
+	for _, v := range merged {
+		if v.Size > 0 {
+			mergedSizes[v.Size] = true
+		}
+	}
+
+	// Merge incoming files — skip if an existing file with the same size is
+	// already present (it means the existing file was renamed and the incoming
+	// key is the original RD filename; the renamed version takes precedence).
 	for k, v := range incoming {
 		if existingFile, exists := merged[k]; exists {
-			// Prefer file with newer AddedOn timestamp
+			// Same key — prefer newer AddedOn timestamp
 			if v.AddedOn.After(existingFile.AddedOn) {
 				merged[k] = v
 			}
+		} else if v.Size > 0 && mergedSizes[v.Size] {
+			// Different key but same size — existing renamed file wins, skip
+			continue
 		} else {
 			merged[k] = v
+			if v.Size > 0 {
+				mergedSizes[v.Size] = true
+			}
 		}
 	}
 

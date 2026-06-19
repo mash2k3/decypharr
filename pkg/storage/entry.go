@@ -243,6 +243,23 @@ func (s *Storage) updateEntryItem(entry *Entry) {
 			item.Files[fileName] = file
 		}
 	}
+	// Remove stale files that belong to this entry but are no longer in entry.Files.
+	// Matches by InfoHash when set, or by size when InfoHash is empty (pre-dates the
+	// InfoHash field — old entries have File.InfoHash == "").
+	entryFileSizes := make(map[int64]bool)
+	for _, ef := range entry.Files {
+		entryFileSizes[ef.Size] = true
+	}
+	for fileName, f := range item.Files {
+		if _, stillPresent := entry.Files[fileName]; stillPresent {
+			continue
+		}
+		if f.InfoHash == entry.InfoHash {
+			delete(item.Files, fileName)
+		} else if f.InfoHash == "" && entryFileSizes[f.Size] {
+			delete(item.Files, fileName)
+		}
+	}
 
 	item.Size = item.GetSize()
 	newFingerprint := EntryItemRepairFingerprint(item)
