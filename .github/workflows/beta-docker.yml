@@ -78,7 +78,7 @@ jobs:
           platforms: ${{ matrix.platform }}
           build-args: |
             VERSION=${{ needs.prepare.outputs.beta_version }}
-            CHANNEL=beta
+            CHANNEL=dev
           cache-from: type=gha,scope=build-${{ env.PLATFORM_PAIR }}
           cache-to: type=gha,scope=build-${{ env.PLATFORM_PAIR }},mode=max
           outputs: type=image,name=${{ env.GHCR_IMAGE }},push-by-digest=true,name-canonical=true,push=true
