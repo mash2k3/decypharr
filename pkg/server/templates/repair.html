@@ -27,25 +27,19 @@
                     </p>
                 </div>
                 <div class="flex flex-wrap gap-2">
-                    <button id="runNowBtn" class="btn btn-primary btn-sm">
-                        <i class="bi bi-play-fill mr-1"></i>Run
-                    </button>
                     <button id="viewBrokenBtn" class="btn btn-outline btn-sm"
                             title="See broken entries and their files">
                         <i class="bi bi-bug mr-1"></i>View broken
                         <span id="brokenCountBadge" class="badge badge-error badge-sm ml-1 hidden">0</span>
                     </button>
-                    <button id="fixBrokenBtn" class="btn btn-error btn-outline btn-sm"
-                            title="Trigger Arr delete + re-search on currently broken entries">
-                        <i class="bi bi-bandaid mr-1"></i>Fix broken
-                    </button>
                     <button id="clearStateBtn" class="btn btn-warning btn-outline btn-sm"
                             title="Clear persisted repair state locally">
                         <i class="bi bi-eraser mr-1"></i>Clear State
                     </button>
-                    <button id="stopRunBtn" class="btn btn-warning btn-sm" disabled>
-                        <i class="bi bi-stop-fill mr-1"></i>Stop
-                    </button>
+                    <!-- Run, Fix broken, Stop hidden — managed by CLI -->
+                    <button id="runNowBtn" class="hidden"></button>
+                    <button id="fixBrokenBtn" class="hidden"></button>
+                    <button id="stopRunBtn" class="hidden" disabled></button>
                 </div>
             </div>
 
@@ -80,49 +74,7 @@
         </div>
     </div>
 
-    <!-- Targeted recheck (by Arr media id) -->
-    <div class="card bg-base-100 shadow-xl">
-        <div class="card-body">
-            <h3 class="card-title text-xl">
-                <i class="bi bi-bullseye mr-2 text-primary"></i>Recheck a specific media
-            </h3>
-            <p class="text-sm opacity-70 mt-1">
-                Targeted one-off check by Arr media id (Sonarr series id, Radarr movie id, tvdb / tmdb id).
-                Useful when something failed to play and you only want to re-verify that one show or movie.
-            </p>
-
-            <form id="recheckMediaForm" class="grid grid-cols-1 md:grid-cols-12 gap-3 mt-4 items-end">
-                <div class="form-control md:col-span-3">
-                    <label class="label py-1" for="recheckArr">
-                        <span class="label-text font-medium">Arr <span class="opacity-60 font-normal">(optional)</span></span>
-                    </label>
-                    <select class="select select-bordered" id="recheckArr">
-                        <option value="">Auto-detect</option>
-                    </select>
-                </div>
-                <div class="form-control md:col-span-5">
-                    <label class="label py-1" for="recheckMediaId">
-                        <span class="label-text font-medium">Media id</span>
-                    </label>
-                    <input type="text" class="input input-bordered" id="recheckMediaId"
-                           placeholder="e.g. 12345" required>
-                </div>
-                <div class="form-control md:col-span-2">
-                    <label class="label cursor-pointer justify-start gap-2 py-1">
-                        <input type="checkbox" class="checkbox checkbox-primary" id="recheckFix">
-                        <span class="label-text">Auto-repair</span>
-                    </label>
-                </div>
-                <div class="md:col-span-2">
-                    <button type="submit" class="btn btn-primary w-full" id="recheckMediaBtn">
-                        <i class="bi bi-search-heart mr-1"></i>Recheck
-                    </button>
-                </div>
-            </form>
-
-            <div id="recheckMediaResult" class="mt-4 hidden bg-base-200/60 rounded-lg p-4 text-sm"></div>
-        </div>
-    </div>
+    <!-- Recheck a specific media hidden — managed by CLI -->
 
     <!-- Run history -->
     <div class="card bg-base-100 shadow-xl">
