@@ -12,7 +12,6 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
@@ -22,7 +21,6 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
-	"golang.org/x/sys/unix"
 )
 
 // ProviderPool manages connections for a single provider using a LIFO stack
@@ -746,28 +744,6 @@ func parseSockBuf(s string) int {
 	return int(n)
 }
 
-// socketControl returns a Dialer.Control hook that sets SO_RCVBUF/SO_SNDBUF on
-// the socket *before* connect, so the SYN advertises a window scale large
-// enough for the configured buffer — the part that actually matters at high
-// RTT. Returns nil (no hook, zero overhead) when both sizes are 0. The OS
-// still caps the effective size (Linux net.core.rmem_max/wmem_max, macOS
-// kern.ipc.maxsockbuf); those sysctls must be raised to realise large windows.
-func (c *Client) socketControl() func(network, address string, rc syscall.RawConn) error {
-	rb, wb := c.sockReadBuf, c.sockWriteBuf
-	if rb <= 0 && wb <= 0 {
-		return nil
-	}
-	return func(_, _ string, rc syscall.RawConn) error {
-		return rc.Control(func(fd uintptr) {
-			if rb > 0 {
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_RCVBUF, rb)
-			}
-			if wb > 0 {
-				_ = unix.SetsockoptInt(int(fd), unix.SOL_SOCKET, unix.SO_SNDBUF, wb)
-			}
-		})
-	}
-}
 
 // tuneTCP applies TCP_NODELAY and (re)applies the configured socket buffers
 // on the established connection. The pre-connect Control hook does the work
