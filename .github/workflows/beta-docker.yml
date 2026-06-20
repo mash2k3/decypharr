@@ -265,16 +265,17 @@ jobs:
         with:
           name: darwin-arm64
           path: dist
-      - name: Create or update dev release
+      - name: Create versioned dev release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           VERSION: ${{ needs.prepare.outputs.dev_version }}
         run: |
-          if gh release view "dev" &>/dev/null; then
-            gh release upload "dev" dist/* --clobber
-          else
-            gh release create "dev" dist/* \
-              --title "decypharr dev" \
-              --prerelease \
-              --notes "Latest dev build from the dev branch."
-          fi
+          TAG="dev-${VERSION}"
+          # Delete previous dev-* releases to keep only the latest
+          gh release list --limit 20 | awk '{print $1}' | grep '^dev-' | while read OLD_TAG; do
+            gh release delete "$OLD_TAG" --yes --cleanup-tag 2>/dev/null || true
+          done
+          gh release create "$TAG" dist/* \
+            --title "cli_mount dev ${VERSION}" \
+            --prerelease \
+            --notes "Latest dev build from the dev branch."
