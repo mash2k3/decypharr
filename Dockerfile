@@ -31,8 +31,8 @@ RUN --mount=type=cache,target=/go/pkg/mod \
     CGO_ENABLED=1 \
     xx-go build -trimpath \
     -ldflags="-w -s -X github.com/sirrobot01/decypharr/pkg/version.Version=${VERSION} -X github.com/sirrobot01/decypharr/pkg/version.Channel=${CHANNEL}" \
-    -o /decypharr && \
-    xx-verify /decypharr
+    -o /cli_mount && \
+    xx-verify /cli_mount
 
 # Build healthcheck (no CGO needed, plain cross-compile)
 RUN --mount=type=cache,target=/go/pkg/mod \
@@ -63,10 +63,10 @@ ARG VERSION=0.0.0
 ARG CHANNEL=dev
 
 LABEL version="${VERSION}-${CHANNEL}"
-LABEL org.opencontainers.image.source="https://github.com/sirrobot01/decypharr"
-LABEL org.opencontainers.image.title="decypharr"
-LABEL org.opencontainers.image.authors="sirrobot01"
-LABEL org.opencontainers.image.documentation="https://github.com/sirrobot01/decypharr/blob/main/README.md"
+LABEL org.opencontainers.image.source="https://github.com/mash2k3/decypharr"
+LABEL org.opencontainers.image.title="cli_mount"
+LABEL org.opencontainers.image.authors="mash2k3"
+LABEL org.opencontainers.image.documentation="https://github.com/mash2k3/decypharr/blob/dev/README.md"
 
 # Install dependencies including rclone (from binary)
 RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata && \
@@ -85,7 +85,7 @@ RUN apk add --no-cache fuse3 ca-certificates su-exec shadow curl unzip tzdata &&
     apk del curl unzip
 
 # Copy binaries and entrypoint
-COPY --from=builder /decypharr /usr/bin/decypharr
+COPY --from=builder /cli_mount /usr/bin/cli_mount
 COPY --from=builder /healthcheck /usr/bin/healthcheck
 COPY --from=ffprobe-extractor /ffprobe /usr/bin/ffprobe
 COPY scripts/entrypoint.sh /entrypoint.sh
@@ -102,4 +102,4 @@ VOLUME ["/app"]
 HEALTHCHECK --interval=10s --retries=10 CMD ["/usr/bin/healthcheck", "--config", "/app"]
 
 ENTRYPOINT ["/entrypoint.sh"]
-CMD ["/usr/bin/decypharr", "--config", "/app"]
+CMD ["/usr/bin/cli_mount", "--config", "/app"]

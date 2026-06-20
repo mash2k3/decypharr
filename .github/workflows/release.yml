@@ -10,7 +10,7 @@ permissions:
   packages: write
 
 env:
-  REGISTRY_GHCR: ghcr.io/mash2k3/decypharr
+  REGISTRY_GHCR: ghcr.io/mash2k3/cli_mount
   LDFLAGS_PKG: github.com/sirrobot01/decypharr/pkg/version
 
 jobs:
@@ -77,19 +77,19 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X ${LDFLAGS_PKG}.Version=${VERSION} -X ${LDFLAGS_PKG}.Channel=${CHANNEL}" \
-            -o dist/decypharr
+            -o dist/cli_mount
 
       - name: Package
         run: |
           ARCH="${{ matrix.arch }}"
           [ "$ARCH" = "amd64" ] && ARCH="x86_64"
-          tar czf "dist/decypharr_Linux_${ARCH}.tar.gz" -C dist decypharr
+          tar czf "dist/cli_mount_Linux_${ARCH}.tar.gz" -C dist cli_mount
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: linux-${{ matrix.arch }}
-          path: dist/decypharr_Linux_*.tar.gz
+          path: dist/cli_mount_Linux_*.tar.gz
 
   build-windows:
     runs-on: ubuntu-latest
@@ -114,17 +114,17 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X ${LDFLAGS_PKG}.Version=${VERSION} -X ${LDFLAGS_PKG}.Channel=${CHANNEL}" \
-            -o dist/decypharr.exe
+            -o dist/cli_mount.exe
 
       - name: Package
         working-directory: dist
-        run: zip decypharr_Windows_x86_64.zip decypharr.exe
+        run: zip cli_mount_Windows_x86_64.zip cli_mount.exe
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: windows-amd64
-          path: dist/decypharr_Windows_x86_64.zip
+          path: dist/cli_mount_Windows_x86_64.zip
 
   build-darwin:
     runs-on: macos-latest
@@ -159,16 +159,16 @@ jobs:
           mkdir -p dist
           go build -trimpath \
             -ldflags="-s -w -X ${LDFLAGS_PKG}.Version=${VERSION} -X ${LDFLAGS_PKG}.Channel=${CHANNEL}" \
-            -o dist/decypharr
+            -o dist/cli_mount
 
       - name: Package
-        run: tar czf "dist/decypharr_Darwin_${{ matrix.label }}.tar.gz" -C dist decypharr
+        run: tar czf "dist/cli_mount_Darwin_${{ matrix.label }}.tar.gz" -C dist cli_mount
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: darwin-${{ matrix.arch }}
-          path: dist/decypharr_Darwin_*.tar.gz
+          path: dist/cli_mount_Darwin_*.tar.gz
 
   docker:
     runs-on: ubuntu-latest
@@ -230,7 +230,7 @@ jobs:
           fi
 
           gh release create "$TAG" dist/* \
-            --title "decypharr ${TAG}" \
+            --title "cli_mount ${TAG}" \
             --generate-notes \
             $PRERELEASE \
             --notes-start-tag "$(git describe --tags --abbrev=0 "${TAG}^" 2>/dev/null || echo "")"
