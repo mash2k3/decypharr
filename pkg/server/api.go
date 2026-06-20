@@ -1117,6 +1117,9 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 			since = time.Unix(ts, 0)
 		}
 	}
+	// Full sync (no since) — skip expensive per-entry NZB segment file reads.
+	// Delta syncs (since > 0) have few entries so segment lookup is fast.
+	fullSync := since.IsZero()
 
 	var changes []syncEntry
 	_ = s.manager.Storage().ForEach(func(entry *storage.Entry) error {
@@ -1133,11 +1136,13 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 		}
 
 		if entry.IsNZB() {
-			// NZB: provider_id = "nzb:{uuid}" matching CLI's filled_by_torrent_id format
 			se.ProviderID = "nzb:" + entry.InfoHash
-			se.NZBSegmentID = s.manager.GetNZBFirstSegmentID(entry.InfoHash)
+			// Skip file-based segment lookup on full sync to avoid timeout.
+			// Delta syncs have few entries so the read is acceptable.
+			if !fullSync {
+				se.NZBSegmentID = s.manager.GetNZBFirstSegmentID(entry.InfoHash)
+			}
 		} else {
-			// Torrent: provider_id = RD torrent ID (placement.ID)
 			if placement := entry.GetActiveProvider(); placement != nil {
 				se.ProviderID = placement.ID
 			}
@@ -1147,6 +1152,12 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 		changes = append(changes, se)
 		return nil
 	})
+
+	s.logger.Info().
+		Int("count", len(changes)).
+		Bool("full_sync", fullSync).
+		Int64("since", since.Unix()).
+		Msg("Sync changes requested")
 
 	if changes == nil {
 		changes = []syncEntry{}
