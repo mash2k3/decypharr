@@ -810,6 +810,19 @@ func (s *Server) handleGetEntryHealth(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, state, http.StatusOK)
 }
 
+func (s *Server) handleDeleteEntryHealth(w http.ResponseWriter, r *http.Request) {
+	name := utils.PathUnescape(chi.URLParam(r, "name"))
+	if name == "" {
+		http.Error(w, "No entry name provided", http.StatusBadRequest)
+		return
+	}
+	if err := s.manager.Storage().DeleteEntryHealth(name); err != nil {
+		http.Error(w, "Failed to delete entry health record", http.StatusInternalServerError)
+		return
+	}
+	utils.JSONResponse(w, map[string]interface{}{"success": true}, http.StatusOK)
+}
+
 func (s *Server) handleRecheckMedia(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Arr     string `json:"arr"`

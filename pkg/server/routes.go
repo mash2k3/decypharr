@@ -63,6 +63,7 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Delete("/repair/runs", s.handleClearRepairRuns)
 			r.Get("/repair/health", s.handleListEntryHealth)
 			r.Get("/repair/health/{name}", s.handleGetEntryHealth)
+			r.Delete("/repair/health/{name}", s.handleDeleteEntryHealth)
 			r.Post("/repair/health/{name}/check", s.handleRecheckEntry)
 
 			// CLI sync endpoint — returns entries changed since a given Unix timestamp
