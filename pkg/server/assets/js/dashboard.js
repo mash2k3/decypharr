@@ -292,7 +292,7 @@ class TorrentDashboard {
                         </div>
                     </td>
                     <td>
-                        <span class="badge badge-ghost">${this.formatSize(torrent.size)}</span>
+                        <span class="badge badge-ghost" style="white-space:nowrap">${this.formatSize(torrent.size)}</span>
                     </td>
                     <td>
                         ${this.renderProgressBar(torrent.progress)}
@@ -505,7 +505,7 @@ class TorrentDashboard {
         const k = 1024;
         const sizes = ['B', 'KB', 'MB', 'GB', 'TB'];
         const i = Math.floor(Math.log(bytes) / Math.log(k));
-        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + ' ' + sizes[i];
     }
 
     formatSpeed(bytesPerSec) {
