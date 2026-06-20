@@ -141,9 +141,6 @@ func New(mgr *manager.Manager) *Server {
 		r.Group(func(r chi.Router) {
 			r.Use(s.authMiddleware)
 
-			//logs
-			r.Get("/logs", s.getLogs) // deprecated, use /debug/logs
-
 			r.Route("/debug", func(r chi.Router) {
 				r.Get("/stats", s.stats.Handler())
 				r.Post("/speedtest", s.handleSpeedTest)
