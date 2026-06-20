@@ -26,13 +26,7 @@ jobs:
       - name: Calculate dev version
         id: meta
         run: |
-          LATEST_TAG=$(git tag | grep -v 'beta' | sort -V | tail -n1)
-          IFS='.' read -r -a VERSION_PARTS <<< "${LATEST_TAG:-0.0.0}"
-          MAJOR="${VERSION_PARTS[0]}"
-          MINOR="${VERSION_PARTS[1]}"
-          PATCH="${VERSION_PARTS[2]}"
-          NEW_PATCH=$((PATCH + 1))
-          DEV_VERSION="${MAJOR}.${MINOR}.${NEW_PATCH}-dev"
+          DEV_VERSION=$(grep -oP 'Version = "\K[^"]+' pkg/version/version.go)
           echo "dev_version=${DEV_VERSION}" >> $GITHUB_OUTPUT
 
   build-linux:
