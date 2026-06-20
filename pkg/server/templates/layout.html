@@ -60,7 +60,7 @@
                 <li><a href="{{.URLBase}}settings" class="{{if eq .Page " config"}}menu-active{{end}}">
                     <i class="bi bi-gear text-info"></i>Settings
                     </a></li>
-                <li><a href="{{.URLBase}}logs" target="_blank">
+                <li><a href="{{.URLBase}}logs" class="{{if eq .Page "logs"}}menu-active{{end}}">
                     <i class="bi bi-journal-text text-warning"></i>Logs
                 </a></li>
             </ul>
@@ -98,7 +98,7 @@
                 <i class="bi bi-gear"></i>
                 <span class="hidden xl:inline">Settings</span>
                 </a></li>
-            <li><a href="{{.URLBase}}debug/logs" target="_blank" class="tooltip tooltip-bottom" data-tip="System Logs">
+            <li><a href="{{.URLBase}}logs" class="{{if eq .Page "logs"}}menu-active{{end}} tooltip tooltip-bottom" data-tip="System Logs">
                 <i class="bi bi-journal-text"></i>
                 <span class="hidden xl:inline">Logs</span>
             </a></li>
@@ -151,6 +151,8 @@
     {{ template "register" . }}
     {{ else if eq .Page "setup" }}
     {{ template "setup" . }}
+    {{ else if eq .Page "logs" }}
+    {{ template "logs" . }}
     {{ else }}
     <div class="hero min-h-96">
         <div class="hero-content text-center">

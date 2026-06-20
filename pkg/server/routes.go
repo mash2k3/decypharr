@@ -41,6 +41,7 @@ func (s *Server) WebRoutes() http.Handler {
 		r.Get("/repair", s.RepairHandler)
 		r.Get("/stats", s.StatsHandler)
 		r.Get("/settings", s.ConfigHandler)
+		r.Get("/logs", s.LogsHandler)
 
 		// API routes
 		r.Route("/api", func(r chi.Router) {
@@ -96,6 +97,9 @@ func (s *Server) WebRoutes() http.Handler {
 				// Rename an entry by infohash
 				r.Patch("/torrents/{hash}/rename", s.handleRenameEntry)
 			})
+
+			// Logs API
+			r.Get("/logs", s.handleGetLogsAPI)
 
 			// Config/Auth
 			r.Get("/config", s.handleGetConfig)

@@ -1,6 +1,7 @@
 package server
 
 import (
+	"bufio"
 	"context"
 	"embed"
 	"errors"
@@ -10,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -91,6 +93,7 @@ func New(mgr *manager.Manager) *Server {
 		"templates/login.html",
 		"templates/register.html",
 		"templates/setup.html",
+		"templates/logs.html",
 	))
 	cookieStore := sessions.NewCookieStore([]byte(cfg.SecretKey()))
 	cookieStore.Options = &sessions.Options{
@@ -253,4 +256,83 @@ func (s *Server) getRcloneLogs(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("error stremaing file %s", err), http.StatusInternalServerError)
 		return
 	}
+}
+
+// LogsHandler serves the in-page log viewer.
+func (s *Server) LogsHandler(w http.ResponseWriter, r *http.Request) {
+	cfg := config.Get()
+	data := map[string]interface{}{
+		"URLBase": cfg.URLBase,
+		"Page":    "logs",
+		"Title":   "Logs",
+	}
+	err := s.templates.ExecuteTemplate(w, "layout", data)
+	if err != nil {
+		s.logger.Warn().Err(err).Msg("error rendering /logs template")
+	}
+}
+
+// handleGetLogsAPI returns the last N lines of the log file as JSON.
+// Query params: lines (default 2000), level (all/debug/info/warn/error), offset (line index to resume from)
+func (s *Server) handleGetLogsAPI(w http.ResponseWriter, r *http.Request) {
+	logFile := filepath.Join(logger.GetLogPath(), "decypharr.log")
+
+	maxLines := 2000
+	if v := r.URL.Query().Get("lines"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 10000 {
+			maxLines = n
+		}
+	}
+	levelFilter := strings.ToLower(r.URL.Query().Get("level"))
+
+	file, err := os.Open(logFile)
+	if err != nil {
+		// Return empty result if log file doesn't exist yet
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"lines":[]}`))
+		return
+	}
+	defer file.Close()
+
+	// Read all lines into a ring buffer of maxLines
+	var allLines []string
+	scanner := bufio.NewScanner(file)
+	scanner.Buffer(make([]byte, 1024*1024), 1024*1024)
+	for scanner.Scan() {
+		line := scanner.Text()
+		if line == "" {
+			continue
+		}
+		// Apply level filter
+		if levelFilter != "" && levelFilter != "all" {
+			upper := strings.ToUpper(levelFilter)
+			// Log lines contain | LEVEL  | — check for the level marker
+			if !strings.Contains(line, "| "+upper) && !strings.Contains(line, "|"+upper) {
+				continue
+			}
+		}
+		allLines = append(allLines, line)
+	}
+
+	// Keep only the last maxLines
+	if len(allLines) > maxLines {
+		allLines = allLines[len(allLines)-maxLines:]
+	}
+
+	// JSON-encode manually to avoid escaping issues with log content
+	w.Header().Set("Content-Type", "application/json")
+	w.Header().Set("Cache-Control", "no-cache")
+	_, _ = fmt.Fprintf(w, `{"lines":[`)
+	for i, line := range allLines {
+		if i > 0 {
+			_, _ = fmt.Fprint(w, ",")
+		}
+		// Simple JSON string encoding
+		encoded := strings.ReplaceAll(line, `\`, `\\`)
+		encoded = strings.ReplaceAll(encoded, `"`, `\"`)
+		encoded = strings.ReplaceAll(encoded, "\n", `\n`)
+		encoded = strings.ReplaceAll(encoded, "\r", ``)
+		_, _ = fmt.Fprintf(w, `"%s"`, encoded)
+	}
+	_, _ = fmt.Fprintf(w, `],"total":%d}`, len(allLines))
 }
