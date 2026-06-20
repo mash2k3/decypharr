@@ -598,6 +598,24 @@ func (m *Manager) EntryExists(infohash string) (bool, error) {
 	return m.storage.Exists(infohash)
 }
 
+// GetNZBFirstSegmentID returns the first segment MessageID for an NZB entry.
+// Used by the CLI sync endpoint to populate nzb_segment_id in the CLI DB.
+func (m *Manager) GetNZBFirstSegmentID(infoHash string) string {
+	if m.usenet == nil {
+		return ""
+	}
+	nzb, err := m.usenet.GetNZB(infoHash)
+	if err != nil || nzb == nil {
+		return ""
+	}
+	for _, f := range nzb.Files {
+		if len(f.Segments) > 0 {
+			return f.Segments[0].MessageID
+		}
+	}
+	return ""
+}
+
 // ClearBadFlag loads the entry from storage, clears Bad=false, and saves it back.
 // Called after CLI re-insertion so Decypharr doesn't block playback with "marked as bad".
 func (m *Manager) ClearBadFlag(infohash string) {

@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	json "github.com/bytedance/sonic"
 
@@ -1087,4 +1088,68 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 	utils.JSONResponse(w, map[string]string{
 		"message": "Authentication settings updated successfully",
 	}, http.StatusOK)
+}
+
+// syncEntry is the per-entry payload returned by /api/sync/changes.
+type syncEntry struct {
+	InfoHash         string `json:"info_hash"`
+	Protocol         string `json:"protocol"`
+	UpdatedAt        int64  `json:"updated_at"`
+	FolderName       string `json:"folder_name"`
+	OriginalFilename string `json:"original_filename"`
+	ProviderID       string `json:"provider_id"`
+	Magnet           string `json:"magnet,omitempty"`
+	NZBSegmentID     string `json:"nzb_segment_id,omitempty"`
+}
+
+// handleSyncChanges returns entries updated since a given Unix timestamp.
+// CLI polls this every few minutes to sync filled_by_torrent_id,
+// filled_by_magnet, debrid_folder_name, original_scraped_torrent_title,
+// filled_by_file, location_basename, and nzb_segment_id.
+//
+// Query params:
+//
+//	since=<unix_timestamp>  only return entries updated after this time (0 = all)
+func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
+	var since time.Time
+	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
+		if ts, err := strconv.ParseInt(sinceStr, 10, 64); err == nil && ts > 0 {
+			since = time.Unix(ts, 0)
+		}
+	}
+
+	var changes []syncEntry
+	_ = s.manager.Storage().ForEach(func(entry *storage.Entry) error {
+		if !since.IsZero() && !entry.UpdatedAt.After(since) {
+			return nil
+		}
+
+		se := syncEntry{
+			InfoHash:         entry.InfoHash,
+			Protocol:         string(entry.Protocol),
+			UpdatedAt:        entry.UpdatedAt.Unix(),
+			FolderName:       entry.GetFolder(),
+			OriginalFilename: entry.OriginalFilename,
+		}
+
+		if entry.IsNZB() {
+			// NZB: provider_id = "nzb:{uuid}" matching CLI's filled_by_torrent_id format
+			se.ProviderID = "nzb:" + entry.InfoHash
+			se.NZBSegmentID = s.manager.GetNZBFirstSegmentID(entry.InfoHash)
+		} else {
+			// Torrent: provider_id = RD torrent ID (placement.ID)
+			if placement := entry.GetActiveProvider(); placement != nil {
+				se.ProviderID = placement.ID
+			}
+			se.Magnet = entry.Magnet
+		}
+
+		changes = append(changes, se)
+		return nil
+	})
+
+	if changes == nil {
+		changes = []syncEntry{}
+	}
+	utils.JSONResponse(w, changes, http.StatusOK)
 }

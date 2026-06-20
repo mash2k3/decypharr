@@ -65,6 +65,9 @@ func (s *Server) WebRoutes() http.Handler {
 			r.Get("/repair/health/{name}", s.handleGetEntryHealth)
 			r.Post("/repair/health/{name}/check", s.handleRecheckEntry)
 
+			// CLI sync endpoint — returns entries changed since a given Unix timestamp
+			r.Get("/sync/changes", s.handleSyncChanges)
+
 			// Torrent management
 			r.Get("/torrents", s.handleGetTorrents)
 			r.Post("/torrents/{hash}/sync", s.handleSyncTorrent)
