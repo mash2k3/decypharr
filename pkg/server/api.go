@@ -1090,16 +1090,25 @@ func (s *Server) handleUpdateAuth(w http.ResponseWriter, r *http.Request) {
 	}, http.StatusOK)
 }
 
+// syncFile is a file within a syncEntry — name and size for CLI matching.
+type syncFile struct {
+	Name string `json:"name"`
+	Size int64  `json:"size"`
+}
+
 // syncEntry is the per-entry payload returned by /api/sync/changes.
 type syncEntry struct {
-	InfoHash         string `json:"info_hash"`
-	Protocol         string `json:"protocol"`
-	UpdatedAt        int64  `json:"updated_at"`
-	FolderName       string `json:"folder_name"`
-	OriginalFilename string `json:"original_filename"`
-	ProviderID       string `json:"provider_id"`
-	Magnet           string `json:"magnet,omitempty"`
-	NZBSegmentID     string `json:"nzb_segment_id,omitempty"`
+	InfoHash         string     `json:"info_hash"`
+	Protocol         string     `json:"protocol"`
+	UpdatedAt        int64      `json:"updated_at"`
+	FolderName       string     `json:"folder_name"`
+	OriginalFilename string     `json:"original_filename"`
+	ProviderID       string     `json:"provider_id"`
+	Magnet           string     `json:"magnet,omitempty"`
+	NZBSegmentID     string     `json:"nzb_segment_id,omitempty"`
+	Bad              bool       `json:"bad"`
+	FileCount        int        `json:"file_count"`
+	Files            []syncFile `json:"files,omitempty"`
 }
 
 // handleSyncChanges returns entries updated since a given Unix timestamp.
@@ -1133,6 +1142,16 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 			UpdatedAt:        entry.UpdatedAt.Unix(),
 			FolderName:       entry.GetFolder(),
 			OriginalFilename: entry.OriginalFilename,
+			Bad:              entry.Bad,
+			FileCount:        len(entry.Files),
+		}
+
+		// Populate files array — name and size for each non-deleted file.
+		// CLI uses size to match each file to the correct media_items row.
+		for _, f := range entry.Files {
+			if f != nil && !f.Deleted {
+				se.Files = append(se.Files, syncFile{Name: f.Name, Size: f.Size})
+			}
 		}
 
 		if entry.IsNZB() {
