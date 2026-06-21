@@ -775,12 +775,22 @@ func (m *Manager) deleteGhostEntries() {
 				if f == nil || f.Size == 0 {
 					continue
 				}
-				if cli, ok := cliSizeMap[f.Size]; ok && cli.hash != e.InfoHash {
+				if cli, ok := cliSizeMap[f.Size]; ok {
 					m.logger.Info().
 						Str("ghost", e.Name).
 						Str("cli_entry", cli.name).
 						Msg("Ghost entry detected by file size match with CLI-renamed entry")
-					m.deleteEntryAndRDTorrent(e, &deleted)
+					if cli.hash == e.InfoHash {
+						// Same hash — the ghost is a stale entryItem index entry for the raw
+						// name. The actual entry (keyed by hash) is the CLI-renamed version —
+						// do NOT delete it. Only remove the stale raw-name index entries.
+						_ = m.storage.DeleteEntryItemByName(e.Name)
+						_ = m.storage.DeleteEntryHealth(e.Name)
+						deleted++
+						m.logger.Info().Str("ghost", e.Name).Msg("Deleted stale raw-name entryItem index entry")
+					} else {
+						m.deleteEntryAndRDTorrent(e, &deleted)
+					}
 					return nil // done with this entry
 				}
 			}

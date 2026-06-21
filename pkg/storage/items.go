@@ -55,6 +55,14 @@ func (s *Storage) GetEntryItem(name string) (*EntryItem, error) {
 	return ProtoToEntryItem(&pb), nil
 }
 
+// DeleteEntryItemByName deletes the entryItem index entry for the given name.
+// Unlike removeFromEntryItem (which uses GetFolder on an entry), this deletes
+// directly by name — used to remove stale raw-name index entries for same-hash
+// ghost entries without touching the underlying entry or its CLI-renamed index.
+func (s *Storage) DeleteEntryItemByName(name string) error {
+	return s.entryItems.Delete(name)
+}
+
 // ForEachEntryItem iterates over entry items
 func (s *Storage) ForEachEntryItem(fn func(*EntryItem) error) error {
 	return s.entryItems.ForEach(func(key string, value []byte) error {
