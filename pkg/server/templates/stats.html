@@ -538,7 +538,7 @@
                 ? `${formatNumber(circuitBreakers)} ${circuitBreakers === 1 ? 'file' : 'files'} temporarily paused`
                 : 'Cache reads normal';
             const cacheHealthTitle = circuitBreakers > 0
-                : 'cli_mount paused cache reads for these files after repeated provider errors. It will retry automatically.'
+                ? 'cli_mount paused cache reads for these files after repeated provider errors. It will retry automatically.'
                 : 'Cache reads are operating normally.';
             const cacheHealthIcon = circuitBreakers > 0 ? 'bi-shield-exclamation' : 'bi-shield-check';
 
