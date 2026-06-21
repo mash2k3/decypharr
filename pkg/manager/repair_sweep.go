@@ -141,6 +141,25 @@ func (r *Repair) executeSweep(ctx context.Context, run *storage.RepairRun, opts 
 	}
 
 	r.finalizeRun(run, storage.RepairRunCompleted, "", "")
+
+	// Purge orphaned health records — entries whose entryItem no longer exists
+	// (e.g. stale records from before a CLI rename). Without this, ghost health
+	// records survive full scans and reappear in the broken list indefinitely.
+	orphansPurged := 0
+	_ = r.manager.storage.ForEachEntryHealth(func(h *storage.EntryHealth) error {
+		if h == nil {
+			return nil
+		}
+		if _, err := r.manager.storage.GetEntryItem(h.EntryName); err != nil {
+			_ = r.manager.storage.DeleteEntryHealth(h.EntryName)
+			orphansPurged++
+		}
+		return nil
+	})
+	if orphansPurged > 0 {
+		log.Info().Int("purged", orphansPurged).Msg("Sweep: purged orphaned health records")
+	}
+
 	log.Info().
 		Int("probed", run.Stats.Probed).
 		Int("broken", run.Stats.Broken).
