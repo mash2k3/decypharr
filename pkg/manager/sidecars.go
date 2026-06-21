@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
 // SubtitleExts is the set of subtitle file extensions recognised across all FUSE backends.
@@ -166,4 +167,52 @@ func (m *Manager) deleteSidecars(infoHash string) {
 	sidecarCacheMu.Lock()
 	delete(sidecarCache, infoHash)
 	sidecarCacheMu.Unlock()
+}
+
+// deleteOrphanSidecars removes sidecar directories that have no matching entry in
+// storage. This catches two classes of orphan:
+//  1. UUID-named dirs left by old Decypharr versions (pre-infohash keying).
+//  2. Infohash dirs whose entry was deleted without the sidecar being cleaned up
+//     (e.g. interrupted shutdown, manual DB edit).
+func (m *Manager) deleteOrphanSidecars() {
+	root := sidecarDir()
+	entries, err := os.ReadDir(root)
+	if err != nil {
+		if !os.IsNotExist(err) {
+			m.logger.Warn().Err(err).Msg("deleteOrphanSidecars: cannot read sidecar dir")
+		}
+		return
+	}
+
+	// Build set of known infohashes from storage (lower-cased to match dir names).
+	known := make(map[string]struct{})
+	_ = m.storage.ForEach(func(e *storage.Entry) error {
+		if e != nil {
+			known[strings.ToLower(e.InfoHash)] = struct{}{}
+		}
+		return nil
+	})
+
+	purged := 0
+	for _, d := range entries {
+		if !d.IsDir() {
+			continue
+		}
+		name := d.Name()
+		if _, ok := known[strings.ToLower(name)]; ok {
+			continue
+		}
+		dir := filepath.Join(root, name)
+		if err := os.RemoveAll(dir); err != nil {
+			m.logger.Warn().Err(err).Str("dir", name).Msg("deleteOrphanSidecars: failed to remove")
+			continue
+		}
+		sidecarCacheMu.Lock()
+		delete(sidecarCache, strings.ToLower(name))
+		sidecarCacheMu.Unlock()
+		purged++
+	}
+	if purged > 0 {
+		m.logger.Info().Int("purged", purged).Msg("Deleted orphan sidecar directories on startup")
+	}
 }

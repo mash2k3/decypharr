@@ -394,6 +394,9 @@ func (m *Manager) Start(ctx context.Context) error {
 		m.clearBadFlagsForHealthyTorrents()
 		// Remove ghost entries — raw-RD-named duplicates of CLI-renamed entries.
 		m.deleteGhostEntries()
+		// Remove sidecar dirs with no matching storage entry (orphans from
+		// deleted torrents or old UUID-keyed Decypharr versions).
+		m.deleteOrphanSidecars()
 		// Sync NZBs
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
