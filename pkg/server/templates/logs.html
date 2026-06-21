@@ -26,14 +26,17 @@
 .log-component { color: #e8601c; }
 .log-msg { color: #c9d1d9; }
 .chip-active { border-color: #e8601c !important; background: rgba(232,96,28,0.15) !important; color: #e8601c !important; }
-#log-controls { gap: 8px; flex-wrap: wrap; }
+#log-controls { gap: 8px; flex-wrap: nowrap; align-items: center; }
 #scroll-bottom-btn { display: none; }
+#level-select, #lines-select { width: 150px; min-width: 150px; flex-shrink: 0; }
+#filter-input { width: 200px; min-width: 200px; flex-shrink: 0; }
+#chip-bar { flex: 1; min-width: 0; }
 </style>
 
 <div class="space-y-3">
     <!-- Controls bar -->
     <div id="log-controls" class="flex items-center">
-        <select id="level-select" class="select select-sm select-bordered w-32">
+        <select id="level-select" class="select select-sm select-bordered">
             <option value="all">All Levels</option>
             <option value="debug">Debug</option>
             <option value="info">Info</option>
@@ -41,7 +44,7 @@
             <option value="error">Error</option>
         </select>
 
-        <select id="lines-select" class="select select-sm select-bordered w-32">
+        <select id="lines-select" class="select select-sm select-bordered">
             <option value="500">500 lines</option>
             <option value="1000">1000 lines</option>
             <option value="2000" selected>2000 lines</option>
@@ -49,7 +52,7 @@
         </select>
 
         <input id="filter-input" type="text" placeholder="Filter logs..."
-               class="input input-sm input-bordered flex-1 min-w-32 max-w-xs">
+               class="input input-sm input-bordered">
 
         <div id="chip-bar" class="flex flex-wrap gap-1"></div>
 
