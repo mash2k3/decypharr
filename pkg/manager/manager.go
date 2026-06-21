@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -797,6 +798,55 @@ func (m *Manager) deleteGhostEntries() {
 			return nil
 		})
 	}
+
+	// Case 3: stale raw-name entryItem keys with no backing entry row.
+	// When cli_mount renames an entry it creates a new entryItem under the new
+	// name but may leave the old raw-name key in items.db. The old key has no
+	// entry row of its own — its files point to hashes that belong to the
+	// CLI-renamed entry. Detect these by finding entryItem keys that:
+	//   a) look like a raw filename (contain '.' but no '{imdb-' tag)
+	//   b) every file in the item points to a hash whose entry is CLI-renamed
+	//      (entry.Name != entry.OriginalFilename)
+	_ = m.storage.ForEachEntryItem(func(item *storage.EntryItem) error {
+		if item == nil || item.Name == "" {
+			return nil
+		}
+		// Skip if it looks like a CLI-renamed folder name
+		if strings.Contains(item.Name, "{imdb-") {
+			return nil
+		}
+		// Must look like a raw filename (has extension or dots typical of raw RD names)
+		if !strings.Contains(item.Name, ".") {
+			return nil
+		}
+		// Check if all files in this item belong to CLI-renamed entries
+		if len(item.Files) == 0 {
+			return nil
+		}
+		allRenamed := true
+		for _, f := range item.Files {
+			if f == nil || f.InfoHash == "" {
+				allRenamed = false
+				break
+			}
+			e, err := m.storage.Get(f.InfoHash)
+			if err != nil || e == nil {
+				allRenamed = false
+				break
+			}
+			if e.Name == "" || e.OriginalFilename == "" || e.Name == e.OriginalFilename {
+				allRenamed = false
+				break
+			}
+		}
+		if allRenamed {
+			_ = m.storage.DeleteEntryItemByName(item.Name)
+			_ = m.storage.DeleteEntryHealth(item.Name)
+			deleted++
+			m.logger.Info().Str("ghost", item.Name).Msg("Deleted stale raw-name entryItem (all files belong to CLI-renamed entry)")
+		}
+		return nil
+	})
 
 	if deleted > 0 {
 		m.logger.Info().Int("deleted", deleted).Msg("Deleted ghost torrent entries on startup")
