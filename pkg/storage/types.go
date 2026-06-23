@@ -93,6 +93,10 @@ type Entry struct {
 	LastError     string     `msgpack:"last_error,omitempty" json:"last_error,omitempty"`           // Last error message
 	ErrorCount    int        `msgpack:"error_count,omitempty" json:"error_count,omitempty"`         // Number of errors
 	LastErrorTime *time.Time `msgpack:"last_error_time,omitempty" json:"last_error_time,omitempty"` // Last error time
+
+	// cli_debrid item IDs keyed by episode filename — e.g. {"S01E01.mkv": 36810}
+	// Populated at collection time so the sync can do direct id lookups.
+	CliDebridIDs map[string]int64 `msgpack:"cli_debrid_ids,omitempty" json:"cli_debrid_ids,omitempty"`
 }
 
 func (e *Entry) IsTorrent() bool {

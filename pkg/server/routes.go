@@ -70,6 +70,9 @@ func (s *Server) WebRoutes() http.Handler {
 			// CLI sync endpoint — returns entries changed since a given Unix timestamp
 			r.Get("/sync/changes", s.handleSyncChanges)
 
+			// cli_debrid item ID registration — merges {filename: item_id} into Entry
+			r.Patch("/entries/{hash}/cli_ids", s.handleRegisterCliIDs)
+
 			// Torrent management
 			r.Get("/torrents", s.handleGetTorrents)
 			r.Post("/torrents/{hash}/sync", s.handleSyncTorrent)

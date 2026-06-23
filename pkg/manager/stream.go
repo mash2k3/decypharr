@@ -32,15 +32,16 @@ var streamBufPool = sync.Pool{
 
 // ActiveStream represents a currently active streaming file
 type ActiveStream struct {
-	ID         string `json:"id"`
-	EntryName  string `json:"entry_name"`
-	FileName   string `json:"file_name"`
-	FileSize   int64  `json:"file_size"`
-	Source     string `json:"source"` // "torrent" or "nzb"
-	StartedAt  int64  `json:"started_at"`
-	LastActive int64  `json:"last_active"` // Last activity timestamp (for observability)
-	Debrid     string `json:"debrid,omitempty"`
-	Client     string `json:"client,omitempty"` // Client identifier (User-Agent for WebDAV, "DFS" for DFS)
+	ID            string           `json:"id"`
+	EntryName     string           `json:"entry_name"`
+	FileName      string           `json:"file_name"`
+	FileSize      int64            `json:"file_size"`
+	Source        string           `json:"source"` // "torrent" or "nzb"
+	StartedAt     int64            `json:"started_at"`
+	LastActive    int64            `json:"last_active"` // Last activity timestamp (for observability)
+	Debrid        string           `json:"debrid,omitempty"`
+	Client        string           `json:"client,omitempty"` // Client identifier (User-Agent for WebDAV, "DFS" for DFS)
+	CliDebridIDs  map[string]int64 `json:"cli_debrid_ids,omitempty"`
 }
 
 // === Active Streams Tracking ===
@@ -177,7 +178,18 @@ func (m *Manager) TrackStream(entry *storage.Entry, filename, client string) str
 		debrid = entry.ActiveProvider
 	}
 
-	return m.registerStream(entry.Name, filename, file.Size, source, debrid, client)
+	streamID := m.registerStream(entry.Name, filename, file.Size, source, debrid, client)
+
+	// Attach cli_debrid_ids directly from the entry so the stats endpoint
+	// doesn't need a separate lookup and handles both NZB and debrid entries.
+	if streamID != "" && len(entry.CliDebridIDs) > 0 {
+		if s, ok := m.activeStreams.Load(streamID); ok {
+			s.CliDebridIDs = entry.CliDebridIDs
+			m.activeStreams.Store(streamID, s)
+		}
+	}
+
+	return streamID
 }
 
 // UntrackStream removes a previously-registered active stream if the ID is non-empty.

@@ -1111,17 +1111,18 @@ type syncFile struct {
 
 // syncEntry is the per-entry payload returned by /api/sync/changes.
 type syncEntry struct {
-	InfoHash         string     `json:"info_hash"`
-	Protocol         string     `json:"protocol"`
-	UpdatedAt        int64      `json:"updated_at"`
-	FolderName       string     `json:"folder_name"`
-	OriginalFilename string     `json:"original_filename"`
-	ProviderID       string     `json:"provider_id"`
-	Magnet           string     `json:"magnet,omitempty"`
-	NZBSegmentID     string     `json:"nzb_segment_id,omitempty"`
-	Bad              bool       `json:"bad"`
-	FileCount        int        `json:"file_count"`
-	Files            []syncFile `json:"files,omitempty"`
+	InfoHash         string           `json:"info_hash"`
+	Protocol         string           `json:"protocol"`
+	UpdatedAt        int64            `json:"updated_at"`
+	FolderName       string           `json:"folder_name"`
+	OriginalFilename string           `json:"original_filename"`
+	ProviderID       string           `json:"provider_id"`
+	Magnet           string           `json:"magnet,omitempty"`
+	NZBSegmentID     string           `json:"nzb_segment_id,omitempty"`
+	Bad              bool             `json:"bad"`
+	FileCount        int              `json:"file_count"`
+	Files            []syncFile       `json:"files,omitempty"`
+	CliDebridIDs     map[string]int64 `json:"cli_debrid_ids,omitempty"`
 }
 
 // handleSyncChanges returns entries updated since a given Unix timestamp.
@@ -1157,6 +1158,7 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 			OriginalFilename: entry.OriginalFilename,
 			Bad:              entry.Bad,
 			FileCount:        len(entry.Files),
+			CliDebridIDs:     entry.CliDebridIDs,
 		}
 
 		// Populate files array — name and size for each non-deleted file.
@@ -1195,4 +1197,45 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 		changes = []syncEntry{}
 	}
 	utils.JSONResponse(w, changes, http.StatusOK)
+}
+
+// handleRegisterCliIDs merges a {filename: cli_debrid_item_id} map into an Entry's
+// CliDebridIDs field. Called by cli_debrid after files are confirmed present in the mount.
+// PATCH /api/entries/{hash}/cli_ids
+func (s *Server) handleRegisterCliIDs(w http.ResponseWriter, r *http.Request) {
+	hash := chi.URLParam(r, "hash")
+	if hash == "" {
+		http.Error(w, "hash required", http.StatusBadRequest)
+		return
+	}
+
+	var incoming map[string]int64
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&incoming); err != nil || len(incoming) == 0 {
+		http.Error(w, "invalid body: expected {filename: item_id}", http.StatusBadRequest)
+		return
+	}
+
+	entry, err := s.manager.GetEntry(hash)
+	if err != nil || entry == nil {
+		http.Error(w, "entry not found", http.StatusNotFound)
+		return
+	}
+
+	// Replace entirely — cli_debrid always sends the complete set for an entry.
+	newIDs := make(map[string]int64, len(incoming))
+	for k, v := range incoming {
+		if k != "" && v > 0 {
+			newIDs[k] = v
+		}
+	}
+	entry.CliDebridIDs = newIDs
+
+	if err := s.manager.Storage().AddOrUpdate(entry); err != nil {
+		s.logger.Error().Err(err).Str("hash", hash).Msg("handleRegisterCliIDs: failed to save entry")
+		http.Error(w, "failed to save", http.StatusInternalServerError)
+		return
+	}
+
+	s.logger.Info().Str("hash", hash).Int("ids", len(incoming)).Msg("Registered cli_debrid IDs")
+	utils.JSONResponse(w, map[string]interface{}{"ok": true, "registered": len(incoming)}, http.StatusOK)
 }

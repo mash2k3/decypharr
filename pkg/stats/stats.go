@@ -145,6 +145,8 @@ func (c *Collector) collect() *Snapshot {
 	}
 
 	// --- Active Streams ---
+	// cli_debrid_ids are attached to each stream at TrackStream time (see stream.go)
+	// so no extra lookup is needed here.
 	streams := c.mgr.GetActiveStreams()
 	snap.ActiveStreams = ActiveStreamStats{
 		Count:   len(streams),
