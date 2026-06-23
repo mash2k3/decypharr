@@ -103,6 +103,7 @@ func (s *Server) WebRoutes() http.Handler {
 
 			// Logs API
 			r.Get("/logs", s.handleGetLogsAPI)
+			r.Post("/logs/share", s.handleShareLogs)
 
 			// Config/Auth
 			r.Get("/config", s.handleGetConfig)

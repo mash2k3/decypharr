@@ -2,6 +2,8 @@ package server
 
 import (
 	"bufio"
+	"bytes"
+	"compress/gzip"
 	"context"
 	"embed"
 	"errors"
@@ -196,7 +198,7 @@ func (s *Server) Start(ctx context.Context) error {
 }
 
 func (s *Server) getLogs(w http.ResponseWriter, r *http.Request) {
-	logFile := filepath.Join(logger.GetLogPath(), "decypharr.log")
+	logFile := filepath.Join(logger.GetLogPath(), "climount.log")
 
 	// Open and read the file
 	file, err := os.Open(logFile)
@@ -272,7 +274,7 @@ func (s *Server) LogsHandler(w http.ResponseWriter, r *http.Request) {
 // handleGetLogsAPI returns the last N lines of the log file as JSON.
 // Query params: lines (default 2000), level (all/debug/info/warn/error), offset (line index to resume from)
 func (s *Server) handleGetLogsAPI(w http.ResponseWriter, r *http.Request) {
-	logFile := filepath.Join(logger.GetLogPath(), "decypharr.log")
+	logFile := filepath.Join(logger.GetLogPath(), "climount.log")
 
 	maxLines := 2000
 	if v := r.URL.Query().Get("lines"); v != "" {
@@ -332,4 +334,93 @@ func (s *Server) handleGetLogsAPI(w http.ResponseWriter, r *http.Request) {
 		_, _ = fmt.Fprintf(w, `"%s"`, encoded)
 	}
 	_, _ = fmt.Fprintf(w, `],"total":%d}`, len(allLines))
+}
+
+// handleShareLogs collects all climount.log + rotated files, gzip-compresses them,
+// and uploads to paste.c-net.org. Returns {"url":"https://..."} on success.
+func (s *Server) handleShareLogs(w http.ResponseWriter, r *http.Request) {
+	logDir := logger.GetLogPath()
+	const maxLines = 1_500_000
+	const maxCompressedBytes = 50 * 1024 * 1024 // 50 MB
+
+	// Collect log files: rotated oldest-first, then current
+	entries, _ := os.ReadDir(logDir)
+	var rotated []string
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), "climount.log.") {
+			rotated = append(rotated, filepath.Join(logDir, e.Name()))
+		}
+	}
+	// sort descending by name so log.9 < log.1 — reverse for oldest-first
+	for i, j := 0, len(rotated)-1; i < j; i, j = i+1, j-1 {
+		rotated[i], rotated[j] = rotated[j], rotated[i]
+	}
+	files := append(rotated, filepath.Join(logDir, "climount.log"))
+
+	// Read up to maxLines lines (ring-buffer via slice rotation)
+	lines := make([]string, 0, maxLines)
+	for _, path := range files {
+		f, err := os.Open(path)
+		if err != nil {
+			continue
+		}
+		sc := bufio.NewScanner(f)
+		sc.Buffer(make([]byte, 1024*1024), 1024*1024)
+		for sc.Scan() {
+			if t := sc.Text(); t != "" {
+				if len(lines) >= maxLines {
+					lines = lines[1:]
+				}
+				lines = append(lines, t)
+			}
+		}
+		f.Close()
+	}
+
+	if len(lines) == 0 {
+		http.Error(w, `{"error":"no log data found"}`, http.StatusNotFound)
+		return
+	}
+
+	// Gzip compress
+	var buf bytes.Buffer
+	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	for _, l := range lines {
+		gz.Write([]byte(l))
+		gz.Write([]byte("\n"))
+	}
+	gz.Close()
+
+	if buf.Len() > maxCompressedBytes {
+		http.Error(w, `{"error":"compressed log exceeds 50MB limit"}`, http.StatusRequestEntityTooLarge)
+		return
+	}
+
+	// Upload to paste.c-net.org
+	req, err := http.NewRequestWithContext(r.Context(), http.MethodPost, "https://paste.c-net.org/", &buf)
+	if err != nil {
+		http.Error(w, `{"error":"failed to create upload request"}`, http.StatusInternalServerError)
+		return
+	}
+	req.Header.Set("X-FileName", "climount.log.gz")
+
+	client := &http.Client{Timeout: 300 * time.Second}
+	resp, err := client.Do(req)
+	if err != nil {
+		s.logger.Error().Err(err).Msg("Share logs: upload failed")
+		http.Error(w, `{"error":"upload failed"}`, http.StatusBadGateway)
+		return
+	}
+	defer resp.Body.Close()
+
+	body, _ := io.ReadAll(resp.Body)
+	url := strings.TrimSpace(string(body))
+	if !strings.HasPrefix(url, "https://") {
+		s.logger.Error().Str("body", url).Msg("Share logs: unexpected response")
+		http.Error(w, `{"error":"unexpected paste service response"}`, http.StatusBadGateway)
+		return
+	}
+
+	w.Header().Set("Content-Type", "application/json")
+	fmt.Fprintf(w, `{"url":%q}`, url)
 }

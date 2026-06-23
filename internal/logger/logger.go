@@ -38,7 +38,7 @@ func GetLogPath() string {
 func sharedRotatingLogFile() *lumberjack.Logger {
 	rotatingLogFileOnce.Do(func() {
 		rotatingLogFile = &lumberjack.Logger{
-			Filename:   filepath.Join(GetLogPath(), "decypharr.log"),
+			Filename:   filepath.Join(GetLogPath(), "climount.log"),
 			MaxSize:    10,
 			MaxAge:     15,
 			MaxBackups: 10,
@@ -121,7 +121,7 @@ func New(prefix string) zerolog.Logger {
 
 func Default() zerolog.Logger {
 	once.Do(func() {
-		logger = New("decypharr")
+		logger = New("climount")
 	})
 	return logger
 }

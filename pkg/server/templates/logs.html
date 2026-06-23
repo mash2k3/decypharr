@@ -68,6 +68,11 @@
             <button id="refresh-btn" class="btn btn-xs btn-outline btn-primary" title="Refresh now">
                 <i class="bi bi-arrow-clockwise"></i>
             </button>
+            <button id="share-logs-btn" class="btn btn-xs btn-outline" title="Share logs via paste.c-net.org" style="position:relative;overflow:hidden;">
+                <i class="bi bi-share"></i> Share Logs
+                <div id="share-progress-bar" style="position:absolute;left:0;top:0;height:100%;width:0%;background:rgba(232,96,28,0.35);transition:width 0.3s;pointer-events:none;"></div>
+            </button>
+            <a id="share-url-link" href="#" target="_blank" class="text-xs text-primary" style="display:none;">View Shared Log</a>
         </div>
     </div>
 
@@ -76,4 +81,65 @@
 </div>
 
 <script src="{{.URLBase}}assets/js/logs.js"></script>
+<script>
+(function() {
+    const btn = document.getElementById('share-logs-btn');
+    const bar = document.getElementById('share-progress-bar');
+    const link = document.getElementById('share-url-link');
+    if (!btn) return;
+
+    btn.addEventListener('click', async function() {
+        btn.disabled = true;
+        btn.querySelector('i').className = 'bi bi-hourglass-split';
+        link.style.display = 'none';
+        bar.style.width = '10%';
+
+        // Fake progress while uploading
+        const steps = [
+            [800,  '20%', 'Collecting...'],
+            [1600, '40%', 'Compressing...'],
+            [2400, '60%', 'Uploading...'],
+        ];
+        let stepIdx = 0;
+        const tick = setInterval(() => {
+            if (stepIdx < steps.length) {
+                bar.style.width = steps[stepIdx][1];
+                btn.childNodes[0].nodeValue = ' ' + steps[stepIdx][2];
+                stepIdx++;
+            }
+        }, 800);
+
+        try {
+            const resp = await fetch('{{.URLBase}}api/logs/share', { method: 'POST' });
+            const data = await resp.json();
+            clearInterval(tick);
+            bar.style.width = '100%';
+            if (data.url) {
+                link.href = data.url;
+                link.textContent = 'View Shared Log';
+                link.style.display = 'inline';
+                btn.querySelector('i').className = 'bi bi-check-circle';
+                btn.childNodes[0].nodeValue = ' Shared!';
+                // Copy to clipboard
+                try { await navigator.clipboard.writeText(data.url); } catch(_) {}
+            } else {
+                throw new Error(data.error || 'unknown error');
+            }
+        } catch(e) {
+            clearInterval(tick);
+            bar.style.width = '0%';
+            btn.querySelector('i').className = 'bi bi-exclamation-circle';
+            btn.childNodes[0].nodeValue = ' Failed';
+            alert('Share logs failed: ' + e.message);
+        } finally {
+            setTimeout(() => {
+                btn.disabled = false;
+                bar.style.width = '0%';
+                btn.querySelector('i').className = 'bi bi-share';
+                if (!link.href || link.href === '#') btn.childNodes[0].nodeValue = ' Share Logs';
+            }, 3000);
+        }
+    });
+})();
+</script>
 {{ end }}

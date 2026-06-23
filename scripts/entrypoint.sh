@@ -15,11 +15,11 @@ setup_directories() {
     mkdir -p /app/logs /app/cache 2>/dev/null || true
 
     # Create log file if it doesn't exist
-    touch /app/logs/decypharr.log 2>/dev/null || true
+    touch /app/logs/climount.log 2>/dev/null || true
 
     # Try to set permissions if possible
     chmod 755 /app 2>/dev/null || true
-    chmod 666 /app/logs/decypharr.log 2>/dev/null || true
+    chmod 666 /app/logs/climount.log 2>/dev/null || true
 }
 
 # Check if we're running as root
@@ -55,8 +55,8 @@ GROUPNAME=$(getent group "$PGID" | cut -d: -f1)
 mkdir -p /app/logs /app/cache
 chown -R "$PUID:$PGID" /app
 chmod 755 /app
-touch /app/logs/decypharr.log
-chmod 666 /app/logs/decypharr.log
+touch /app/logs/climount.log
+chmod 666 /app/logs/climount.log
 
 # Export for rclone/fuse
 export USER="$USERNAME"

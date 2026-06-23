@@ -504,7 +504,7 @@ docker logs -f decypharr
 **Binary:**
 
 ```bash
-./decypharr 2>&1 | tee decypharr.log
+./decypharr 2>&1 | tee climount.log
 ```
 
 ### Check configuration
