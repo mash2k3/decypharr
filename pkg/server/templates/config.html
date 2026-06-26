@@ -167,8 +167,7 @@
                             </div>
 
                             <div class="divider">
-                                <span class="text-lg font-semibold"><i class="bi bi-hdd-network mr-3 text-info"></i>WebDAV & External Rclone
-                                Settings</span>
+                                <span class="text-lg font-semibold"><i class="bi bi-hdd-network mr-3 text-info"></i>WebDAV & Other Settings</span>
                             </div>
 
                             <div class="space-y-6">
@@ -204,6 +203,17 @@
                                                    id="refresh_dirs" placeholder="/path1,/path2">
                                             <span class="text-sm opacity-70">Comma-separated list of directories to
                                                 refresh</span>
+                                        </div>
+                                        <div>
+                                            <label class="label" for="usenet_deobfuscate_mode">
+                                                <span class="font-medium">Deobfuscate Mode</span>
+                                            </label>
+                                            <select class="select w-full" name="usenet.deobfuscate_mode" id="usenet_deobfuscate_mode">
+                                                <option value="">No Action</option>
+                                                <option value="index">Index (01, 02, 03…)</option>
+                                                <option value="season_ep">Season/Episode (S01E01…)</option>
+                                            </select>
+                                            <span class="text-sm opacity-70">Rename obfuscated NZB filenames using PAR2 data</span>
                                         </div>
                                     </div>
                                 </div>

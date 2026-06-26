@@ -351,6 +351,9 @@ func (m *Manager) processNewTorrent(torrent *storage.Entry, debridTorrent *debri
 	// Update status to submitting
 	torrent.UpdatedAt = time.Now()
 	applyDebridTorrentToEntry(torrent, debridTorrent)
+	// Resolve name after applying debrid data so resolveEntryName sees the raw name
+	torrent.Name = m.resolveEntryName(debridTorrent.Name)
+	torrent.ContentPath = torrent.DownloadPath() // re-sync after name resolution
 	_ = m.queue.Update(torrent)
 
 	if debridTorrent.Status != debridTypes.TorrentStatusDownloaded {

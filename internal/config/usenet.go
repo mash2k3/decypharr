@@ -7,6 +7,23 @@ import (
 	"strconv"
 )
 
+// DeobfuscateMode controls how obfuscated NZB files are renamed.
+type DeobfuscateMode string
+
+const (
+	DeobfuscateModeOff      DeobfuscateMode = ""
+	DeobfuscateModeIndex    DeobfuscateMode = "index"
+	DeobfuscateModeSeasonEp DeobfuscateMode = "season_ep"
+)
+
+func (m DeobfuscateMode) IsValid() bool {
+	switch m {
+	case DeobfuscateModeOff, DeobfuscateModeIndex, DeobfuscateModeSeasonEp:
+		return true
+	}
+	return false
+}
+
 type UsenetProvider struct {
 	Host           string `json:"host,omitempty"` // Host of the usenet server
 	Port           int    `json:"port,omitempty"` // Port of the usenet server
@@ -56,6 +73,10 @@ type Usenet struct {
 	// smooth playback; this bounds the aggregate so many concurrent streams
 	// can't OOM. Empty = default (512MB); "0" disables the cap.
 	BufferMemory string `json:"buffer_memory,omitempty"`
+
+	SkipRepair bool `json:"skip_repair,omitempty"` // Skip repairing nzb/usenet files
+
+	DeobfuscateMode DeobfuscateMode `json:"deobfuscate_mode,omitempty"` // Renaming mode for obfuscated files
 }
 
 // BufferMemoryBytes resolves the usenet streaming-buffer RAM cap. Empty ->
@@ -136,6 +157,12 @@ func (c *Config) updateUsenetProvider(index int, u UsenetProvider) UsenetProvide
 	if u.Priority == 0 {
 		u.Priority = index + 1 // Default priority based on order
 	}
+	// Auto-enable TLS for ports that only speak implicit TLS.
+	// Users who set port 563 (NNTPS) or 443 without ssl:true get a
+	// plain-TCP connection that never completes the handshake.
+	if !u.SSL && (u.Port == 563 || u.Port == 443) {
+		u.SSL = true
+	}
 	return u
 }
 
@@ -201,6 +228,14 @@ func (c *Config) applyUsenetEnvVars() {
 		if v, err := strconv.Atoi(availabilitySample); err == nil {
 			c.Usenet.ImportAvailabilitySamplePercent = v
 		}
+	}
+
+	if skipRepair := getEnv("USENET__SKIP_REPAIR"); skipRepair != "" {
+		c.Usenet.SkipRepair = parseBool(skipRepair)
+	}
+
+	if deobfuscateMode := getEnv("USENET__DEOBFUSCATE_MODE"); deobfuscateMode != "" {
+		c.Usenet.DeobfuscateMode = DeobfuscateMode(deobfuscateMode)
 	}
 
 	// Usenet providers array

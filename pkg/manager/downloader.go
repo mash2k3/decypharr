@@ -16,17 +16,21 @@ import (
 	grab "github.com/cavaliergopher/grab/v3"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
+	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
+	"github.com/sirrobot01/decypharr/pkg/manager/link"
 	"github.com/sirrobot01/decypharr/pkg/notifications"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 	"github.com/sourcegraph/conc/pool"
 )
 
 type Downloader struct {
-	manager   *Manager
-	strmURL   string
-	mountPath string
-	dest      string
-	logger    zerolog.Logger
+	manager          *Manager
+	strmURL          string
+	mountPath        string
+	dest             string
+	logger           zerolog.Logger
+	rateLimitRetries int
 }
 
 const (
@@ -65,11 +69,12 @@ func NewDownloadManager(manager *Manager) *Downloader {
 		strmURL = fmt.Sprintf("http://%s:%s", bindAddress, cfg.Port)
 	}
 	return &Downloader{
-		manager:   manager,
-		strmURL:   strmURL,
-		mountPath: cfg.Mount.MountPath,
-		logger:    manager.logger.With().Str("component", "downloader").Logger(),
-		dest:      cfg.DownloadFolder,
+		manager:          manager,
+		strmURL:          strmURL,
+		mountPath:        cfg.Mount.MountPath,
+		logger:           manager.logger.With().Str("component", "downloader").Logger(),
+		dest:             cfg.DownloadFolder,
+		rateLimitRetries: cfg.RateLimitRetries,
 	}
 }
 
@@ -472,7 +477,17 @@ func (d *Downloader) processDownload(entry *storage.Entry) error {
 }
 
 // processTorrentDownload downloads files from debrid via HTTP
-func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
+func (d *Downloader) processTorrentDownload(entry *storage.Entry) (retErr error) {
+	// download() sets IsDownloading=true before entering here. If we return an
+	// error the flag must be cleared so processQueuedEntries can pick this entry
+	// up again on the next scheduler cycle instead of leaving it permanently stuck.
+	defer func() {
+		if retErr != nil {
+			entry.IsDownloading = false
+			_ = d.manager.queue.Update(entry)
+		}
+	}()
+
 	files := entry.GetActiveFiles()
 	d.logger.Info().Msgf("Downloading %d files...", len(files))
 
@@ -502,24 +517,56 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 		_ = d.manager.queue.Update(entry)
 	}
 
-	// Resolve download links before spawning goroutines
+	// Resolve download links before spawning goroutines.
+	// If any GetLink call returns HTTP 429 (rate-limited), the entry is reported
+	// as "paused" to the arr so it holds the item in queue, then the request is
+	// retried after an exponential backoff. The validated-link cache is cleared
+	// before each retry so that a CDN URL that expired during the pause is
+	// re-fetched from the debrid provider rather than re-validated stale.
 	type downloadTask struct {
 		file *storage.File
 		link string
 	}
 	var tasks []downloadTask
 	for _, file := range files {
-		downloadLink, err := d.manager.linkService.GetLink(context.Background(), entry, file.Name)
-		if err != nil {
-			d.logger.Error().Msgf("Failed to get download link for %s: %v", file.Name, err)
-			continue
+		var dlLink types.DownloadLink
+		var lastErr error
+		for attempt := 0; ; attempt++ {
+			dlLink, lastErr = d.manager.linkService.GetLink(context.Background(), entry, file.Name)
+			if lastErr == nil {
+				break
+			}
+			le := link.GetLinkError(lastErr)
+			if le == nil || !le.ShouldRetry() || attempt >= d.rateLimitRetries {
+				return fmt.Errorf("failed to get download link for %s: %w", file.Name, lastErr)
+			}
+			backoff := rateLimitBackoff(attempt)
+			d.logger.Warn().
+				Str("file", file.Name).
+				Int("attempt", attempt+1).
+				Int("max_retries", d.rateLimitRetries).
+				Dur("backoff", backoff).
+				Msg("GetLink rate-limited (429), pausing download before retry")
+			entry.State = storage.EntryStatePausedDL
+			_ = d.manager.queue.Update(entry)
+			select {
+			case <-time.After(backoff):
+			case <-d.operationContext().Done():
+				return d.operationContext().Err()
+			}
+			d.manager.linkService.Clear()
+			entry.State = storage.EntryStateDownloading
+			_ = d.manager.queue.Update(entry)
 		}
-		tasks = append(tasks, downloadTask{file: file, link: downloadLink.DownloadLink})
+		tasks = append(tasks, downloadTask{file: file, link: dlLink.DownloadLink})
 	}
 
-	// If no valid download links were obtained, return error instead of panic
+	// If no valid download links were obtained, mark as error and return
 	if len(tasks) == 0 {
-		return fmt.Errorf("no valid download links available for %s", entry.Name)
+		err := fmt.Errorf("no valid download links available for %s", entry.Name)
+		entry.MarkAsError(err)
+		_ = d.manager.queue.Update(entry)
+		return err
 	}
 
 	p := pool.New().WithErrors().WithFirstError()
@@ -540,7 +587,10 @@ func (d *Downloader) processTorrentDownload(entry *storage.Entry) error {
 	}
 
 	if err := p.Wait(); err != nil {
-		return fmt.Errorf("download failed: %w", err)
+		wrappedErr := fmt.Errorf("download failed: %w", err)
+		entry.MarkAsError(wrappedErr)
+		_ = d.manager.queue.Update(entry)
+		return wrappedErr
 	}
 	d.completeEntry(entry)
 	d.logger.Info().Msgf("Downloaded all files for %s", entry.Name)
@@ -575,13 +625,22 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 	// Track per-file progress so we can compute the global total across all files
 	fileProgress := make(map[string]int64)
 
-	p := pool.New().WithErrors().WithFirstError()
-	for _, file := range files {
-		p.Go(func() error {
+	// fileErrs[i] is written only by goroutine i — no lock needed.
+	type fileErr struct {
+		permanent bool // true = 430 article-not-found; false = transient error
+		err       error
+	}
+	fileErrs := make([]fileErr, len(files))
+
+	p := pool.New()
+	for i, file := range files {
+		i, file := i, file
+		p.Go(func() {
 			destPath := filepath.Join(downloadedFolder, file.Name)
 			destFile, err := os.Create(destPath)
 			if err != nil {
-				return fmt.Errorf("failed to create file %s: %w", file.Name, err)
+				fileErrs[i] = fileErr{err: fmt.Errorf("failed to create file %s: %w", file.Name, err)}
+				return
 			}
 			defer destFile.Close()
 
@@ -602,25 +661,58 @@ func (d *Downloader) processUsenetDownload(entry *storage.Entry) error {
 
 			if err := d.manager.usenet.Download(d.manager.ctx, entry.InfoHash, file.Name, destFile, progressCallback); err != nil {
 				_ = os.Remove(destPath)
-				return fmt.Errorf("failed to download %s: %w", file.Name, err)
+				fileErrs[i] = fileErr{
+					// 430 article-not-found is a permanent failure — the content
+					// is gone from all providers and retrying will not help.
+					permanent: nntp.IsArticleNotFoundError(err),
+					err:       fmt.Errorf("failed to download %s: %w", file.Name, err),
+				}
+				return
 			}
-
 			d.logger.Info().Msgf("Downloaded NZB file: %s", file.Name)
-			return nil
 		})
 	}
+	p.Wait()
 
-	err := p.Wait()
-
-	if err != nil {
-		entry.MarkAsError(err)
-		_ = d.manager.queue.Update(entry)
-		return fmt.Errorf("NZB download failed: %w", err)
+	// Tally outcomes and decide how to proceed.
+	var permanentCount, transientCount int
+	for i, fe := range fileErrs {
+		if fe.err == nil {
+			continue
+		}
+		if fe.permanent {
+			permanentCount++
+			files[i].Deleted = true
+			d.logger.Warn().Msgf("File permanently unavailable on Usenet, marking deleted: %s", files[i].Name)
+		} else {
+			transientCount++
+			d.logger.Error().Err(fe.err).Msgf("Transient error downloading NZB file")
+		}
 	}
 
-	d.completeEntry(entry)
-	d.logger.Info().Msgf("Downloaded all NZB files for %s", entry.Name)
-	return nil
+	successCount := len(files) - permanentCount - transientCount
+
+	switch {
+	case transientCount > 0:
+		_ = os.RemoveAll(downloadedFolder)
+		return fmt.Errorf("%d NZB file(s) failed with transient errors", transientCount)
+
+	case permanentCount > 0 && successCount == 0:
+		_ = os.RemoveAll(downloadedFolder)
+		entry.MarkAsError(fmt.Errorf("all %d file(s) unavailable on Usenet", permanentCount))
+		_ = d.manager.queue.Update(entry)
+		return fmt.Errorf("NZB download failed: all files unavailable on Usenet")
+
+	case permanentCount > 0:
+		d.logger.Info().Msgf("Partial NZB download: %d/%d files available for %s", successCount, len(files), entry.Name)
+		d.completeEntry(entry)
+		return nil
+
+	default:
+		d.completeEntry(entry)
+		d.logger.Info().Msgf("Downloaded all NZB files for %s", entry.Name)
+		return nil
+	}
 }
 
 // processStrm creates symlinks for torrent files
@@ -820,4 +912,19 @@ func (d *Downloader) logDownloadCompletion(filename string, startTime time.Time,
 		Dur("duration", elapsed).
 		Float64("speed_mbps", speedMBps).
 		Msg("download transfer completed")
+}
+
+// rateLimitBackoff returns the delay before the (attempt+1)-th retry on a 429
+// response. Backoff doubles each attempt starting at 30 s, capped at 5 minutes.
+func rateLimitBackoff(attempt int) time.Duration {
+	const base = 30 * time.Second
+	const capDur = 5 * time.Minute
+	d := base
+	for i := 0; i < attempt; i++ {
+		d *= 2
+		if d > capDur {
+			return capDur
+		}
+	}
+	return d
 }

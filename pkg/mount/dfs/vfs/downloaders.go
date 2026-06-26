@@ -53,6 +53,9 @@ const (
 	// Without a cap, binary doubling eventually produces chunk sizes in the GB range,
 	// causing oversized HTTP range requests that are wasteful on seeks.
 	maxChunkSizeMultiplier = 16
+	// minSuccessfulChunksBeforeGrowth keeps short-lived scans at the base chunk size
+	// until the stream proves it is sustained sequential reading.
+	minSuccessfulChunksBeforeGrowth = 2
 )
 
 // Downloaders coordinates multiple concurrent downloads to a cache item
@@ -96,11 +99,9 @@ type Downloaders struct {
 	circuitOpenAt atomic.Int64 // Unix nano timestamp when circuit opened
 }
 
-// ensureStreamTracked makes sure the active stream is registered when reads begin.
-func (dls *Downloaders) ensureStreamTracked() {
-	dls.mu.Lock()
-	defer dls.mu.Unlock()
-
+// ensureStreamTrackedLocked makes sure the active stream is registered when
+// reads begin. Caller must hold dls.mu.
+func (dls *Downloaders) ensureStreamTrackedLocked() {
 	if dls.closed || dls.streamID != "" {
 		return
 	}
@@ -269,8 +270,6 @@ func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range
 		return fmt.Errorf("circuit breaker open, cooldown active: last error: %w", lastErr)
 	}
 
-	dls.ensureStreamTracked()
-
 	// Update activity timestamp for idle detection
 	dls.touchActivity()
 
@@ -279,6 +278,20 @@ func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range
 		dls.mu.Unlock()
 		return errors.New("downloaders closed")
 	}
+
+	// Reject new work while StopAll() is tearing down the current session so
+	// we don't race a new stream/downloader against the teardown path.
+	if dls.stopping {
+		dls.mu.Unlock()
+		return errors.New("downloaders stopping")
+	}
+
+	if err := dls.ctx.Err(); err != nil {
+		dls.mu.Unlock()
+		return err
+	}
+
+	dls.ensureStreamTrackedLocked()
 
 	// Lazy restart: if we went idle, restart the kicker goroutine. Skipped
 	// while stopping so we don't race a new kicker against StopAll()'s wait

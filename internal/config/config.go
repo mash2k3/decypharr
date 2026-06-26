@@ -261,7 +261,23 @@ type Config struct {
 	Retries      int    `json:"retries,omitempty"`
 	SkipAutoMove bool   `json:"skip_auto_move,omitempty"`
 
+	// RateLimitRetries controls how many times processTorrentDownload will retry
+	// a GetLink call that returns HTTP 429 (Too Many Requests) before failing the
+	// whole job. Each retry waits with exponential backoff (30 s, 60 s, 120 s …
+	// capped at 5 min) and reports the entry as "paused" to the arr client during
+	// the wait so the arr does not remove or re-grab the item.
+	// Set to 0 to disable the retry behaviour and fail immediately on 429.
+	RateLimitRetries int `json:"rate_limit_retries,omitempty"`
+
 	Repair RepairConfig `json:"repair,omitzero"`
+
+	// PreferASCIIName controls whether cli_mount extracts the ASCII/Western title
+	// from a raw torrent name (e.g. picking "Percy Jackson" out of a mixed
+	// Cyrillic or CJK release name) and builds a compact canonical directory name.
+	// Disable only if your library is intentionally non-Western and you want the
+	// raw name preserved (byte-safe truncated to 255 bytes if needed).
+	// Default: true
+	PreferASCIIName *bool `json:"prefer_ascii_name,omitempty"`
 
 	// QueueCleanup is the global arr queue-cleanup policy (see CleanupQueue).
 	QueueCleanup QueueCleanup `json:"queue_cleanup,omitempty"`
@@ -540,6 +556,10 @@ func (c *Config) setDefaults() {
 	// Set default error threshold for multi-debrid switching
 	if c.Retries == 0 {
 		c.Retries = 3 // Default to 3 consecutive errors before switching
+	}
+
+	if c.RateLimitRetries == 0 {
+		c.RateLimitRetries = 3 // Default: retry up to 3 times on HTTP 429 with 30s/60s/120s backoff
 	}
 
 	c.QueueCleanup.Rules = mergeQueueCleanupRules(c.QueueCleanup.Rules)

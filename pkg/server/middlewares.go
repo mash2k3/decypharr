@@ -10,6 +10,13 @@ import (
 	"github.com/sirrobot01/decypharr/internal/config"
 )
 
+// redirectTo sends a redirect that respects the configured URLBase so that
+// relative paths work correctly behind a reverse proxy sub-path.
+func (s *Server) redirectTo(w http.ResponseWriter, r *http.Request, path string) {
+	base := strings.TrimSuffix(s.urlBase, "/")
+	http.Redirect(w, r, base+path, http.StatusSeeOther)
+}
+
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// Check if setup is needed
@@ -25,7 +32,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if isAPI {
 				s.sendJSONError(w, "Authentication setup required", http.StatusUnauthorized)
 			} else {
-				http.Redirect(w, r, "/register", http.StatusSeeOther)
+				s.redirectTo(w, r, "/register")
 			}
 			return
 		}
@@ -44,7 +51,7 @@ func (s *Server) authMiddleware(next http.Handler) http.Handler {
 			if isAPI {
 				s.sendJSONError(w, "Authentication required. Please provide a valid API token in the Authorization header (Bearer <token>) or authenticate via session cookies.", http.StatusUnauthorized)
 			} else {
-				http.Redirect(w, r, "/login", http.StatusSeeOther)
+				s.redirectTo(w, r, "/login")
 			}
 			return
 		}
@@ -95,7 +102,7 @@ func (s *Server) setupRedirectMiddleware(next http.Handler) http.Handler {
 			if isAPI {
 				s.sendJSONError(w, fmt.Sprintf("[error] %s Setup wizard must be completed first. Please visit /setup", err), http.StatusServiceUnavailable)
 			} else {
-				http.Redirect(w, r, "/setup", http.StatusSeeOther)
+				s.redirectTo(w, r, "/setup")
 			}
 			return
 		}

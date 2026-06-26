@@ -401,6 +401,10 @@ func (m *Manager) Start(ctx context.Context) error {
 		if err := m.syncNZBs(ctx); err != nil {
 			m.logger.Error().Err(err).Msg("Failed to perform initial NZB syncTorrents")
 		}
+		// Remove queue entries whose NZB meta file is missing — these are orphaned
+		// references from a previous instance (e.g. after migrating from decypharr
+		// to cli_mount). They would otherwise stall at 0% indefinitely.
+		m.purgeOrphanNZBQueueEntries()
 		if fixNZB := os.Getenv("DECYPHARR_FIX_NZB_SIZES"); fixNZB == "1" {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
 			m.fixNZBFileSizes(ctx)
@@ -926,6 +930,14 @@ func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 	if err := m.storage.Delete(infohash); err != nil {
 		return err
 	}
+
+	// Clean up NZB metadata so WebDAV stops serving the file path after deletion
+	if torr.Protocol == config.ProtocolNZB && m.usenet != nil {
+		if err := m.usenet.Delete(infohash); err != nil {
+			m.logger.Warn().Err(err).Str("infohash", infohash).Msg("Failed to delete NZB metadata after queue entry deletion")
+		}
+	}
+
 	// Remove any sidecar files stored for this entry
 	m.deleteSidecars(infohash)
 	// Refresh entry cache

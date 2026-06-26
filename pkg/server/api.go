@@ -561,6 +561,8 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 	// Preserve fields that shouldn't be overwritten by frontend
 	currentConfig := config.Get()
 	newConfig.Auth = currentConfig.GetAuth()
+	newConfig.UseAuth = currentConfig.UseAuth
+	newConfig.EnableWebdavAuth = currentConfig.EnableWebdavAuth
 
 	// Filter out empty or incomplete arrs
 	validArrs := make([]config.Arr, 0, len(newConfig.Arrs))

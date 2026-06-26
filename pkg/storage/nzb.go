@@ -60,6 +60,8 @@ type NZBFile struct {
 	SegmentSize   int64        `json:"segment_size,omitempty" msgpack:"segment_size,omitempty"`     // Size of each segment in bytes, if applicable
 	EncryptionKey []byte       `json:"encryption_key,omitempty" msgpack:"encryption_key,omitempty"` // AES-256 key for encrypted files (32 bytes)
 	EncryptionIV  []byte       `json:"encryption_iv,omitempty" msgpack:"encryption_iv,omitempty"`   // AES IV for encrypted files (16 bytes, from file extra area)
+	LocalPath     string       `json:"local_path,omitempty" msgpack:"local_path,omitempty"`         // Optional on-disk path
+	Number        int          `json:"number,omitempty" msgpack:"number,omitempty"`                 // Original sequence number
 	IsEncrypted   bool         `json:"is_encrypted,omitempty" msgpack:"is_encrypted,omitempty"`     // True if file data is encrypted
 }
 

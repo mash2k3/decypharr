@@ -233,6 +233,39 @@ func (m *Manager) SpeedTest(ctx context.Context, req SpeedTestRequest) SpeedTest
 	}
 }
 
+// purgeOrphanNZBQueueEntries removes queue entries whose NZB metadata file no
+// longer exists on disk. This happens when users migrate from an older
+// decypharr/cli_mount instance: queue.db carries over job IDs that the new
+// instance knows nothing about, causing downloads to show 0% indefinitely.
+// Only NZB protocol entries are touched; debrid torrent entries are unaffected.
+func (m *Manager) purgeOrphanNZBQueueEntries() {
+	if m.usenet == nil {
+		return
+	}
+
+	entries := m.queue.ListFilter("", config.ProtocolNZB, "", nil, "", false)
+	if len(entries) == 0 {
+		return
+	}
+
+	purged := 0
+	for _, entry := range entries {
+		if _, err := m.usenet.GetNZB(entry.InfoHash); err != nil {
+			// Meta file missing — this job is unknown to the current instance.
+			if err := m.queue.DeleteEntryOnly(entry.InfoHash); err != nil {
+				m.logger.Warn().Err(err).Str("name", entry.Name).Str("id", entry.InfoHash).Msg("Failed to purge orphan NZB queue entry")
+			} else {
+				m.logger.Info().Str("name", entry.Name).Str("id", entry.InfoHash).Msg("Purged orphan NZB queue entry (meta file missing)")
+				purged++
+			}
+		}
+	}
+
+	if purged > 0 {
+		m.logger.Info().Int("purged", purged).Msg("Purged orphan NZB queue entries from previous instance")
+	}
+}
+
 func (m *Manager) syncNZBs(ctx context.Context) error {
 	if m.usenet == nil {
 		return nil
