@@ -18,6 +18,7 @@ import (
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
+	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
 	debrid "github.com/sirrobot01/decypharr/pkg/debrid/common"
 	debridTypes "github.com/sirrobot01/decypharr/pkg/debrid/types"
@@ -73,12 +74,13 @@ func (c *healCache) do(infoHash string, fix func() error) error {
 
 // fileResult is the outcome of probing one file in an entry.
 type fileResult struct {
-	name     string
-	infoHash string
-	protocol config.Protocol
-	healthy  bool
-	broken   bool
-	reason   string // populated only when broken or unknown
+	name        string
+	infoHash    string
+	cliDebridID int64
+	protocol    config.Protocol
+	healthy     bool
+	broken      bool
+	reason      string // populated only when broken or unknown
 }
 
 // executeSweep is the body of a sweep: enumerate, filter due, probe, repair.
@@ -408,6 +410,7 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 		res.reason = "entry_not_found"
 		return res
 	}
+	res.cliDebridID = entry.CliDebridIDs[name]
 	res.protocol = entry.Protocol
 	if !repairProtocolMatches(r.effectiveProtocolScope(opts), entry.Protocol) {
 		res.reason = "protocol_skipped"
@@ -415,9 +418,49 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 	}
 
 	if entry.IsNZB() {
-		return r.probeNZBFile(ctx, entry, name, res)
+		res = r.probeNZBFile(ctx, entry, name, res)
+	} else {
+		res = r.probeTorrentFile(ctx, entry, file, name, res, opts)
 	}
-	return r.probeTorrentFile(ctx, entry, file, name, res, opts)
+	entryName := item.Name
+	if entryName == "" {
+		entryName = entry.GetFolder()
+	}
+	return r.probeMountedFileIfMedia(ctx, entryName, name, res)
+}
+
+// probeMountedFileIfMedia makes mounted playback the authoritative final gate
+// for media files. A definitive provider/article failure remains broken and is
+// not hidden by cached local bytes. For all other protocol outcomes, a
+// successful mounted probe confirms healthy while an inconclusive mounted
+// probe prevents a false healthy classification.
+func (r *Repair) probeMountedFileIfMedia(ctx context.Context, entryName, name string, res fileResult) fileResult {
+	if res.broken || !utils.IsMediaFile(name) {
+		return res
+	}
+	path, ok := mountedMediaPath(r.manager.config.Mount.MountPath, entryName, name)
+	if !ok {
+		res.healthy = false
+		res.reason = "media_probe_unavailable"
+		return res
+	}
+
+	probe := r.probeMountedMedia(ctx, path)
+	switch probe.state {
+	case mediaProbeHealthy:
+		res.healthy = true
+		res.broken = false
+		res.reason = ""
+	case mediaProbeBroken:
+		res.healthy = false
+		res.broken = true
+		res.reason = probe.reason
+	default:
+		res.healthy = false
+		res.broken = false
+		res.reason = probe.reason
+	}
+	return res
 }
 
 func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name string, res fileResult) fileResult {
@@ -522,7 +565,7 @@ func (r *Repair) probeTorrentFileByUnrestrict(entry *storage.Entry, file *storag
 func (r *Repair) autoHealResults(ctx context.Context, results []fileResult, heal *healCache) {
 	byHash := make(map[string][]int)
 	for i, res := range results {
-		if !res.broken || res.protocol != config.ProtocolTorrent || res.infoHash == "" {
+		if !res.broken || res.protocol != config.ProtocolTorrent || res.infoHash == "" || isMountedMediaFailure(res.reason) {
 			continue
 		}
 		byHash[res.infoHash] = append(byHash[res.infoHash], i)
@@ -558,11 +601,12 @@ func (r *Repair) brokenFiles(c *candidate, results []fileResult) []storage.Broke
 			continue
 		}
 		bf := storage.BrokenFile{
-			EntryName: c.name,
-			FileName:  res.name,
-			InfoHash:  res.infoHash,
-			Protocol:  res.protocol,
-			Reason:    res.reason,
+			EntryName:   c.name,
+			FileName:    res.name,
+			InfoHash:    res.infoHash,
+			Protocol:    res.protocol,
+			CliDebridID: res.cliDebridID,
+			Reason:      res.reason,
 		}
 		if file, ok := c.item.Files[res.name]; ok && file != nil {
 			bf.Size = file.Size

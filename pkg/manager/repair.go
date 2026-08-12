@@ -69,6 +69,14 @@ type Repair struct {
 	scheduler gocron.Scheduler
 	logger    zerolog.Logger
 
+	// mediaProbeSlots bounds mounted-file reads and ffprobe processes across
+	// the whole repair service. The normal repair worker limits still apply;
+	// this smaller shared gate keeps a large sweep from overwhelming FUSE.
+	mediaProbeSlots chan struct{}
+	// mediaProbeAttempt is replaceable by tests. Production uses the real
+	// mounted-file read + ffprobe implementation from media_probe.go.
+	mediaProbeAttempt func(context.Context, string) mediaProbeResult
+
 	mu             sync.Mutex
 	parentCtx      context.Context
 	activeRunID    string
@@ -83,10 +91,12 @@ type Repair struct {
 // Repair.Start to register the recurring sweep with the scheduler.
 func NewRepair(m *Manager) *Repair {
 	return &Repair{
-		manager:   m,
-		scheduler: m.scheduler,
-		logger:    logger.New("repair"),
-		parentCtx: context.Background(),
+		manager:           m,
+		scheduler:         m.scheduler,
+		logger:            logger.New("repair"),
+		parentCtx:         context.Background(),
+		mediaProbeSlots:   make(chan struct{}, repairMediaProbeConcurrency),
+		mediaProbeAttempt: runMountedMediaProbeAttempt,
 	}
 }
 

@@ -161,7 +161,8 @@ Clear run history.
 
 ### GET /api/repair/health
 
-List entry health. Optional `?status=broken` filter.
+List entry health. Optional `?status=broken` filter. Broken-file records include
+an optional `cli_debrid_id` when cli_debrid registered an ID for that filename.
 
 ```bash
 curl -H "Authorization: Bearer TOKEN" \
@@ -170,7 +171,10 @@ curl -H "Authorization: Bearer TOKEN" \
 
 ### GET /api/repair/health/{name}
 
-Per-entry health, including the broken-file list.
+Per-entry health, including the broken-file list and optional per-file
+`cli_debrid_id`. Mounted media failures use `mount_file_missing`,
+`mount_read_error`, `media_probe_failed`, or `media_no_playable_stream` as the
+reason.
 
 ### POST /api/repair/health/{name}/check
 

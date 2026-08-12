@@ -202,16 +202,18 @@ const (
 )
 
 // BrokenFile carries everything the repair pipeline needs to act on a single
-// broken file: where it lives in storage, which infohash it belongs to, and —
-// when an Arr knows about it — the Arr-side identifiers needed to delete and
-// re-search without another lookup.
+// broken file: where it lives in storage, which infohash it belongs to, the
+// cli_debrid replacement ID when registered, and — when an Arr knows about it
+// — the Arr-side identifiers needed to delete and re-search without another
+// lookup.
 type BrokenFile struct {
-	EntryName string          `json:"entry_name"`
-	FileName  string          `json:"file_name"`
-	InfoHash  string          `json:"info_hash,omitempty"`
-	Protocol  config.Protocol `json:"protocol,omitempty"`
-	Reason    string          `json:"reason,omitempty"`
-	Size      int64           `json:"size,omitempty"`
+	EntryName   string          `json:"entry_name"`
+	FileName    string          `json:"file_name"`
+	InfoHash    string          `json:"info_hash,omitempty"`
+	Protocol    config.Protocol `json:"protocol,omitempty"`
+	CliDebridID int64           `json:"cli_debrid_id,omitempty"`
+	Reason      string          `json:"reason,omitempty"`
+	Size        int64           `json:"size,omitempty"`
 
 	// Arr re-acquire payload. Empty when source=managed or when no Arr owns
 	// the file.

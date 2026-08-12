@@ -13,8 +13,8 @@ Every entry has exactly one health record with one of these statuses:
 
 | Status        | Meaning                                                        |
 |---------------|----------------------------------------------------------------|
-| `healthy`     | All probed files are reachable.                                |
-| `broken`      | At least one file failed its probe.                            |
+| `healthy`     | All probed files are reachable; media also passed mounted playback validation. |
+| `broken`      | At least one file failed its provider, article, mount-read, or media probe. |
 | `repairing`   | A sweep is currently probing or fixing this entry.             |
 | `unknown`     | Probe was inconclusive (no files broken, none confirmed OK).   |
 | `stale`       | Last check is older than `recheck_interval`.                   |
@@ -105,6 +105,30 @@ If a full sweep would take 2 days at 9 hours/day but `recheck_interval` is `168h
 - **`per_entry`** — probe stops at the first broken file in an entry. Faster on broken libraries; sufficient when you only need to know "is this entry intact?".
 - **`per_file`** — probe every file. Use when you want a complete broken-file list per entry (e.g. to drive a per-file Arr re-acquire).
 
+### Mounted media validation
+
+Torrent and NZB media files receive a second-stage probe through the canonical
+`<mount_path>/__all__/<entry>/<file>` path after their existing provider-link
+or article-availability check. Decypharr reads bounded 2 MiB head and tail
+windows, then runs the bundled `ffprobe` and requires at least one audio or
+video stream. This catches files whose metadata and remote availability look
+valid but whose mounted bytes return `EIO` or cannot initialize in a player.
+
+Deterministic failures are retried once with a fresh file handle and ffprobe
+process. Repeatable failures become `broken`; timeouts, permission problems,
+and probe-environment failures remain `unknown` so a transient infrastructure
+problem does not trigger replacement. Mounted media probes are globally capped
+at four concurrent files.
+
+Broken mounted-media reasons are stable API values:
+
+- `mount_file_missing`
+- `mount_read_error`
+- `media_probe_failed`
+- `media_no_playable_stream`
+
+Non-media sidecars continue to use only the existing protocol probe.
+
 ### Sources
 
 - **`arr`** — walks Sonarr / Radarr media, resolves each item to an entry through the symlink target, and probes that entry. Broken files are enriched with Arr identifiers so repair can call `DeleteFiles` + `SearchMissing` directly.
@@ -114,7 +138,7 @@ If a full sweep would take 2 days at 9 hours/day but `recheck_interval` is `168h
 
 1. The cron tick (or a manual **Run Now**) opens a new run.
 2. Candidates are selected per the rules above.
-3. For each candidate, the entry is marked `repairing` and probed by a worker.
+3. For each candidate, the entry is marked `repairing` and probed by a worker. Media files that are not already definitively broken are also read and inspected with `ffprobe` through the mount.
 4. The entry's health is updated with the probe outcome (`healthy` / `broken` / `unknown`), broken files, fingerprint, and timestamps.
 5. If `auto_repair` is on and the entry has Arr-known broken files, they are batched per Arr and submitted via delete + search. After the repair attempt, only those entries are re-probed.
 6. The run record's stats are updated live throughout, so the status panel reflects progress without needing to wait for completion.
@@ -144,7 +168,7 @@ A failure to persist a single entry's health update is logged but never aborts t
 | `GET`    | `/api/repair/runs/{id}`               | Run detail.                                                              |
 | `DELETE` | `/api/repair/runs`                    | Clear run history.                                                       |
 | `GET`    | `/api/repair/health`                  | List entry health (optional `?status=broken`).                           |
-| `GET`    | `/api/repair/health/{name}`           | Per-entry health, including the broken-file list.                        |
+| `GET`    | `/api/repair/health/{name}`           | Per-entry health, including broken files and optional `cli_debrid_id`.   |
 | `POST`   | `/api/repair/health/{name}/check`     | Force-recheck this entry.                                                |
 | `POST`   | `/api/repair/recheck/media`           | Recheck a single Arr media item. Body: `{arr, media_id, fix}`. Repairs run through Arr. |
 
