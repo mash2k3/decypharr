@@ -125,7 +125,11 @@ func classifyMountedReadError(err error) mediaProbeResult {
 		errors.Is(err, syscall.ENETUNREACH) || errors.Is(err, syscall.EHOSTUNREACH) {
 		return mediaProbeResult{state: mediaProbeUnknown, reason: "media_probe_unavailable"}
 	}
-	return mediaProbeResult{state: mediaProbeBroken, reason: "mount_read_error"}
+	// Mounted reads can surface transient backend/FUSE failures as generic I/O
+	// errors. Do not make those files replacement-eligible. Missing paths remain
+	// definitive above, while ffprobe can still classify readable-but-invalid
+	// media after the bounded reads succeed.
+	return mediaProbeResult{state: mediaProbeUnknown, reason: "media_probe_unavailable"}
 }
 
 type ffprobeDocument struct {

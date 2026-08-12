@@ -111,8 +111,9 @@ Torrent and NZB media files receive a second-stage probe through the canonical
 `<mount_path>/__all__/<entry>/<file>` path after their existing provider-link
 or article-availability check. Decypharr reads bounded 2 MiB head and tail
 windows, then runs the bundled `ffprobe` and requires at least one audio or
-video stream. This catches files whose metadata and remote availability look
-valid but whose mounted bytes return `EIO` or cannot initialize in a player.
+video stream. Generic mounted read failures remain `unknown`, because FUSE and
+remote backends can report transient failures as I/O errors. Readable files
+that cannot initialize in `ffprobe` are still classified as broken.
 
 Deterministic failures are retried once with a fresh file handle and ffprobe
 process. Repeatable failures become `broken`; timeouts, permission problems,
@@ -123,13 +124,12 @@ at four concurrent files.
 Broken mounted-media reasons are stable API values:
 
 - `mount_file_missing`
-- `mount_read_error`
 - `media_probe_failed`
 - `media_no_playable_stream`
 
 Non-media sidecars continue to use only the existing protocol probe.
 
-For NZB replacements initiated by `mount_read_error`, `media_probe_failed`, or
+For NZB replacements initiated by `media_probe_failed` or
 `media_no_playable_stream`, collection is provisional. cli_debrid asks
 cli_mount to validate the exact new NZB UUID and registered media item. The
 verification runs the Usenet article check first and then this mounted playback

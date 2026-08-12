@@ -20,14 +20,6 @@ func TestProbeMountedMediaRetriesDeterministicFailures(t *testing.T) {
 		wantAttempts int
 	}{
 		{
-			name: "repeatable EIO becomes broken",
-			results: []mediaProbeResult{
-				{state: mediaProbeBroken, reason: "mount_read_error"},
-				{state: mediaProbeBroken, reason: "mount_read_error"},
-			},
-			wantState: mediaProbeBroken, wantReason: "mount_read_error", wantAttempts: 2,
-		},
-		{
 			name: "successful retry becomes healthy",
 			results: []mediaProbeResult{
 				{state: mediaProbeBroken, reason: "media_probe_failed"},
@@ -73,7 +65,7 @@ func TestClassifyMountedReadError(t *testing.T) {
 		wantState  mediaProbeState
 		wantReason string
 	}{
-		{name: "EIO", err: syscall.EIO, wantState: mediaProbeBroken, wantReason: "mount_read_error"},
+		{name: "EIO", err: syscall.EIO, wantState: mediaProbeUnknown, wantReason: "media_probe_unavailable"},
 		{name: "missing", err: syscall.ENOENT, wantState: mediaProbeBroken, wantReason: "mount_file_missing"},
 		{name: "permission", err: syscall.EACCES, wantState: mediaProbeUnknown, wantReason: "media_probe_unavailable"},
 		{name: "timeout", err: context.DeadlineExceeded, wantState: mediaProbeUnknown, wantReason: "media_probe_timeout"},
@@ -115,12 +107,12 @@ func TestProbeMountedFileAppliesToTorrentAndNZB(t *testing.T) {
 				mediaProbeSlots: make(chan struct{}, repairMediaProbeConcurrency),
 				mediaProbeAttempt: func(_ context.Context, path string) mediaProbeResult {
 					probedPath = path
-					return mediaProbeResult{state: mediaProbeBroken, reason: "mount_read_error"}
+					return mediaProbeResult{state: mediaProbeBroken, reason: "media_probe_failed"}
 				},
 			}
 			got := r.probeMountedFileIfMedia(context.Background(), "Shameless Season 7", "Shameless.S07E07.mkv", fileResult{healthy: true, protocol: protocol})
-			if !got.broken || got.reason != "mount_read_error" {
-				t.Fatalf("result = %#v, want broken mount_read_error", got)
+			if !got.broken || got.reason != "media_probe_failed" {
+				t.Fatalf("result = %#v, want broken media_probe_failed", got)
 			}
 			if filepath.Base(probedPath) != "Shameless.S07E07.mkv" {
 				t.Fatalf("probed path = %q", probedPath)
@@ -160,7 +152,7 @@ func TestBrokenFilesIncludesCliDebridID(t *testing.T) {
 		}},
 	}
 	files := r.brokenFiles(c, []fileResult{{
-		name: "Shameless.S07E07.mkv", cliDebridID: 36810, broken: true, reason: "mount_read_error",
+		name: "Shameless.S07E07.mkv", cliDebridID: 36810, broken: true, reason: "media_probe_failed",
 	}})
 	if len(files) != 1 || files[0].CliDebridID != 36810 {
 		t.Fatalf("broken files = %#v", files)
@@ -183,7 +175,7 @@ func TestMountedMediaFailuresAreNotAutoHealed(t *testing.T) {
 
 func TestClassifyMountedReadErrorWrapsErrors(t *testing.T) {
 	got := classifyMountedReadError(errors.Join(errors.New("read failed"), syscall.EIO))
-	if got.state != mediaProbeBroken || got.reason != "mount_read_error" {
+	if got.state != mediaProbeUnknown || got.reason != "media_probe_unavailable" {
 		t.Fatalf("result = %#v", got)
 	}
 }

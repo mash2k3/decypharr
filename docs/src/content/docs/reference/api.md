@@ -173,8 +173,8 @@ curl -H "Authorization: Bearer TOKEN" \
 
 Per-entry health, including the broken-file list and optional per-file
 `cli_debrid_id`. Mounted media failures use `mount_file_missing`,
-`mount_read_error`, `media_probe_failed`, or `media_no_playable_stream` as the
-reason.
+`media_probe_failed`, or `media_no_playable_stream` as the reason. Generic
+mounted read failures remain `unknown` as `media_probe_unavailable`.
 
 ### POST /api/repair/health/{name}/check
 
@@ -190,8 +190,8 @@ curl -X POST \
 
 Acknowledges that cli_debrid has collected a replacement for one exact mounted
 file. The request must include `entry_name`, `file_name`, `info_hash`,
-`cli_debrid_id`, and `reason`. Only `mount_read_error`, `media_probe_failed`, and
-`media_no_playable_stream` are accepted. The file is removed locally while
+`cli_debrid_id`, and `reason`. New cleanup handoffs use `media_probe_failed` or
+`media_no_playable_stream`. The file is removed locally while
 healthy siblings remain; the provider entry is deleted only when no active files
 remain. Repeating the request safely returns `already_removed`.
 
@@ -199,7 +199,7 @@ remain. Repeating the request safely returns `already_removed`.
 curl -X POST \
   -H "Authorization: Bearer TOKEN" \
   -H "Content-Type: application/json" \
-  -d '{"entry_name":"My.Show.S01","file_name":"My.Show.S01E03.mkv","info_hash":"OLD_ID","cli_debrid_id":75299,"reason":"mount_read_error"}' \
+  -d '{"entry_name":"My.Show.S01","file_name":"My.Show.S01E03.mkv","info_hash":"OLD_ID","cli_debrid_id":75299,"reason":"media_probe_failed"}' \
   http://localhost:8282/api/repair/replacements/ack
 ```
 
