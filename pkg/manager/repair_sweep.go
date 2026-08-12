@@ -1186,6 +1186,151 @@ var replacementCleanupReasons = map[string]struct{}{
 	"media_no_playable_stream": {},
 }
 
+type replacementVerifyTarget struct {
+	entry     *storage.Entry
+	entryName string
+	fileName  string
+	file      *storage.File
+}
+
+// VerifyReplacement resolves a collected source by the exact cli_debrid item
+// registration and provider hash, then runs the same mounted playback gate as
+// a repair sweep. Broken results are persisted so the failed candidate enters
+// the next exact-replacement cycle; inconclusive infrastructure failures are
+// deliberately left unknown.
+func (r *Repair) VerifyReplacement(ctx context.Context, req ReplacementVerifyRequest) (*ReplacementVerifyResult, error) {
+	req.InfoHash = strings.TrimSpace(req.InfoHash)
+	if req.CliDebridID <= 0 || req.InfoHash == "" {
+		return nil, &ReplacementAckError{Code: "invalid_request", Message: "a positive cli_debrid_id and info_hash are required"}
+	}
+
+	r.mu.Lock()
+	if r.activeRunID != "" {
+		id := r.activeRunID
+		r.mu.Unlock()
+		return nil, &ReplacementAckError{Code: "repair_busy", Message: fmt.Sprintf("repair run %s is active", id)}
+	}
+	r.activeVerifications++
+	r.mu.Unlock()
+	defer func() {
+		r.mu.Lock()
+		r.activeVerifications--
+		r.mu.Unlock()
+	}()
+
+	target, err := r.resolveReplacementVerifyTarget(req)
+	if err != nil {
+		return nil, err
+	}
+	if !utils.IsMediaFile(target.fileName) {
+		return nil, &ReplacementAckError{Code: "unsupported_media", Message: "replacement playback verification requires a recognized media file"}
+	}
+	path, ok := mountedMediaPath(r.manager.config.Mount.MountPath, target.entryName, target.fileName)
+	if !ok {
+		return &ReplacementVerifyResult{Status: "unknown", Reason: "media_probe_unavailable", EntryName: target.entryName, FileName: target.fileName}, nil
+	}
+	probe := r.probeMountedMedia(ctx, path)
+	result := &ReplacementVerifyResult{Reason: probe.reason, EntryName: target.entryName, FileName: target.fileName}
+	switch probe.state {
+	case mediaProbeHealthy:
+		result.Status = "healthy"
+		r.persistReplacementVerification(target, probe, time.Now())
+	case mediaProbeBroken:
+		result.Status = "broken"
+		r.persistReplacementVerification(target, probe, time.Now())
+	default:
+		result.Status = "unknown"
+	}
+	return result, nil
+}
+
+func (r *Repair) resolveReplacementVerifyTarget(req ReplacementVerifyRequest) (*replacementVerifyTarget, error) {
+	var registeredElsewhere bool
+	var candidates []*replacementVerifyTarget
+	err := r.manager.storage.ForEach(func(entry *storage.Entry) error {
+		if entry == nil {
+			return nil
+		}
+		for fileName, id := range entry.CliDebridIDs {
+			if id != req.CliDebridID {
+				continue
+			}
+			if entry.InfoHash != req.InfoHash {
+				registeredElsewhere = true
+				continue
+			}
+			_ = r.manager.storage.ForEachEntryItem(func(item *storage.EntryItem) error {
+				if item == nil {
+					return nil
+				}
+				file := item.Files[fileName]
+				if file != nil && !file.Deleted && file.InfoHash == req.InfoHash {
+					candidates = append(candidates, &replacementVerifyTarget{entry: entry, entryName: item.Name, fileName: fileName, file: file})
+				}
+				return nil
+			})
+		}
+		return nil
+	})
+	if err != nil {
+		return nil, fmt.Errorf("resolve replacement registration: %w", err)
+	}
+	if len(candidates) == 1 {
+		return candidates[0], nil
+	}
+	if len(candidates) > 1 {
+		return nil, &ReplacementAckError{Code: "stale_target", Message: "replacement identifiers resolve to multiple active mounted files"}
+	}
+	if registeredElsewhere {
+		return nil, &ReplacementAckError{Code: "stale_target", Message: "cli_debrid_id is registered to a different current provider source"}
+	}
+	return nil, &ReplacementAckError{Code: "replacement_not_ready", Message: "replacement is not yet registered as an active mounted file"}
+}
+
+func (r *Repair) persistReplacementVerification(target *replacementVerifyTarget, probe mediaProbeResult, at time.Time) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	health, _ := r.manager.storage.GetEntryHealth(target.entryName)
+	if health == nil {
+		health = &storage.EntryHealth{EntryName: target.entryName, Protocol: target.entry.Protocol}
+	}
+	health.FileCount = 0
+	if item, err := r.manager.storage.GetEntryItem(target.entryName); err == nil {
+		health.FileCount = len(item.GetActiveFiles())
+	}
+	health.LastCheckedAt = at
+	health.Dirty = false
+	health.DirtyReason = ""
+	health.ActiveRunID = ""
+
+	remaining := make([]storage.BrokenFile, 0, len(health.BrokenFiles)+1)
+	for _, broken := range health.BrokenFiles {
+		if broken.FileName == target.fileName && broken.InfoHash == target.entry.InfoHash && broken.CliDebridID == target.entry.CliDebridIDs[target.fileName] {
+			continue
+		}
+		remaining = append(remaining, broken)
+	}
+	if probe.state == mediaProbeBroken {
+		remaining = append(remaining, storage.BrokenFile{
+			EntryName: target.entryName, FileName: target.fileName, InfoHash: target.entry.InfoHash,
+			Protocol: target.entry.Protocol, CliDebridID: target.entry.CliDebridIDs[target.fileName],
+			Reason: probe.reason, Size: target.file.Size,
+		})
+		health.Status = storage.HealthBroken
+		health.LastFailedAt = at
+		health.FailureReason = topReason(remaining)
+	} else if len(remaining) == 0 {
+		health.Status = storage.HealthHealthy
+		health.LastOKAt = at
+		health.FailureReason = ""
+	} else {
+		health.Status = storage.HealthBroken
+		health.FailureReason = topReason(remaining)
+	}
+	health.BrokenFiles = remaining
+	r.saveHealth(health)
+}
+
 // AcknowledgeReplacement removes exactly one locally-unplayable mounted file
 // after cli_debrid has collected its replacement. It intentionally does not
 // share ClearBroken's entry-wide behavior: healthy siblings in a pack remain
@@ -1206,7 +1351,10 @@ func (r *Repair) AcknowledgeReplacement(req ReplacementAckRequest) (*Replacement
 	// storage mutation prevents a sweep from rewriting the same health record.
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if r.activeRunID != "" {
+	if r.activeRunID != "" || r.activeVerifications > 0 {
+		if r.activeRunID == "" {
+			return nil, &ReplacementAckError{Code: "repair_busy", Message: "replacement playback verification is active"}
+		}
 		return nil, &ReplacementAckError{Code: "repair_busy", Message: fmt.Sprintf("repair run %s is active", r.activeRunID)}
 	}
 
@@ -1316,9 +1464,12 @@ func (r *Repair) FixBroken(ctx context.Context, names []string) (*storage.Repair
 	}
 
 	r.mu.Lock()
-	if r.activeRunID != "" {
+	if r.activeRunID != "" || r.activeVerifications > 0 {
 		id := r.activeRunID
 		r.mu.Unlock()
+		if id == "" {
+			return nil, errors.New("replacement playback verification is active")
+		}
 		return nil, fmt.Errorf("repair already running (run %s)", id)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -1389,9 +1540,12 @@ func (r *Repair) ClearBroken(ctx context.Context, names []string) (*storage.Repa
 	}
 
 	r.mu.Lock()
-	if r.activeRunID != "" {
+	if r.activeRunID != "" || r.activeVerifications > 0 {
 		id := r.activeRunID
 		r.mu.Unlock()
+		if id == "" {
+			return nil, errors.New("replacement playback verification is active")
+		}
 		return nil, fmt.Errorf("repair already running (run %s)", id)
 	}
 	runCtx, cancel := context.WithCancel(ctx)
@@ -1568,9 +1722,12 @@ func (r *Repair) RecheckMedia(ctx context.Context, arrName, mediaID string, fix 
 	}
 
 	r.mu.Lock()
-	if r.activeRunID != "" {
+	if r.activeRunID != "" || r.activeVerifications > 0 {
 		id := r.activeRunID
 		r.mu.Unlock()
+		if id == "" {
+			return nil, errors.New("replacement playback verification is active")
+		}
 		return nil, fmt.Errorf("repair already running (run %s)", id)
 	}
 	runCtx, cancel := context.WithCancel(ctx)

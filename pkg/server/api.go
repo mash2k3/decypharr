@@ -999,6 +999,35 @@ func (s *Server) handleAcknowledgeReplacement(w http.ResponseWriter, r *http.Req
 	utils.JSONResponse(w, result, http.StatusOK)
 }
 
+func (s *Server) handleVerifyReplacement(w http.ResponseWriter, req *http.Request) {
+	var body manager.ReplacementVerifyRequest
+	if err := json.ConfigDefault.NewDecoder(req.Body).Decode(&body); err != nil {
+		utils.JSONResponse(w, map[string]string{"code": "invalid_request", "message": "invalid JSON body"}, http.StatusBadRequest)
+		return
+	}
+	svc := s.manager.Repair()
+	if svc == nil {
+		utils.JSONResponse(w, map[string]string{"code": "repair_unavailable", "message": "repair service not available"}, http.StatusServiceUnavailable)
+		return
+	}
+	result, err := svc.VerifyReplacement(req.Context(), body)
+	if err != nil {
+		var verifyErr *manager.ReplacementAckError
+		if errors.As(err, &verifyErr) {
+			status := http.StatusConflict
+			if verifyErr.Code == "invalid_request" || verifyErr.Code == "unsupported_media" {
+				status = http.StatusBadRequest
+			}
+			utils.JSONResponse(w, map[string]string{"code": verifyErr.Code, "message": verifyErr.Message}, status)
+			return
+		}
+		s.logger.Error().Err(err).Msg("Failed to verify cli_debrid replacement")
+		utils.JSONResponse(w, map[string]string{"code": "verification_failed", "message": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	utils.JSONResponse(w, result, http.StatusOK)
+}
+
 func (s *Server) handleClearRepairState(w http.ResponseWriter, r *http.Request) {
 	var req struct {
 		Statuses []string `json:"statuses"`

@@ -64,6 +64,21 @@ type ReplacementAckResult struct {
 	EntryDeleted bool   `json:"entry_deleted"`
 }
 
+// ReplacementVerifyRequest identifies the newly-collected provider source.
+// cli_debrid_id is the stable media-item identity; info_hash prevents a delayed
+// response from validating a candidate that has already been superseded.
+type ReplacementVerifyRequest struct {
+	CliDebridID int64  `json:"cli_debrid_id"`
+	InfoHash    string `json:"info_hash"`
+}
+
+type ReplacementVerifyResult struct {
+	Status    string `json:"status"`
+	Reason    string `json:"reason,omitempty"`
+	EntryName string `json:"entry_name,omitempty"`
+	FileName  string `json:"file_name,omitempty"`
+}
+
 type ReplacementAckError struct {
 	Code    string
 	Message string
@@ -100,14 +115,15 @@ type Repair struct {
 	// mounted-file read + ffprobe implementation from media_probe.go.
 	mediaProbeAttempt func(context.Context, string) mediaProbeResult
 
-	mu             sync.Mutex
-	parentCtx      context.Context
-	activeRunID    string
-	cancelRun      context.CancelFunc
-	scheduled      bool
-	stopScheduled  bool
-	activeStopFunc func() // called by the stop job for the active run
-	runWG          sync.WaitGroup
+	mu                  sync.Mutex
+	parentCtx           context.Context
+	activeRunID         string
+	activeVerifications int
+	cancelRun           context.CancelFunc
+	scheduled           bool
+	stopScheduled       bool
+	activeStopFunc      func() // called by the stop job for the active run
+	runWG               sync.WaitGroup
 }
 
 // NewRepair builds the repair service for the given manager. Call
@@ -472,9 +488,12 @@ func (r *Repair) runSweep(trigger storage.RepairRunTrigger, opts RepairRunOption
 	}
 
 	r.mu.Lock()
-	if r.activeRunID != "" {
+	if r.activeRunID != "" || r.activeVerifications > 0 {
 		id := r.activeRunID
 		r.mu.Unlock()
+		if id == "" {
+			return "", errors.New("replacement playback verification is active")
+		}
 		return id, errors.New("repair already running")
 	}
 

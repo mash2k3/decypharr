@@ -203,6 +203,24 @@ curl -X POST \
   http://localhost:8282/api/repair/replacements/ack
 ```
 
+### POST /api/repair/replacements/verify
+
+Validates a newly collected playback-repair candidate before cli_debrid reports
+success or acknowledges any old files. The exact active mounted file is resolved
+from its registered `cli_debrid_id` and current provider `info_hash`, then checked
+with bounded head/tail reads and ffprobe. `healthy`, `broken`, and `unknown`
+results use the same semantics as repair health; a broken result is persisted so
+that candidate can enter the next replacement cycle. `repair_busy` and
+`replacement_not_ready` responses are safe to retry.
+
+```bash
+curl -X POST \
+  -H "Authorization: Bearer TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"cli_debrid_id":75299,"info_hash":"NEW_PROVIDER_ID"}' \
+  http://localhost:8282/api/repair/replacements/verify
+```
+
 ### POST /api/repair/recheck/media
 
 Recheck a single Arr media item. Set `fix` to `true` to repair through Arr after checking.

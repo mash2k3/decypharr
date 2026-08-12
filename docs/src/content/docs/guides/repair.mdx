@@ -130,9 +130,13 @@ Broken mounted-media reasons are stable API values:
 Non-media sidecars continue to use only the existing protocol probe.
 
 When cli_debrid replaces a file broken by `mount_read_error`,
-`media_probe_failed`, or `media_no_playable_stream`, it acknowledges that exact
-file only after the replacement reaches `Collected`. cli_mount then hides the
-old file while preserving healthy siblings in the same torrent or NZB. Missing
+`media_probe_failed`, or `media_no_playable_stream`, collection is provisional.
+It asks cli_mount to validate the exact new provider hash and registered media
+item through this same mounted playback probe. Only a `healthy` result allows
+cli_debrid to acknowledge the accumulated old files and report the replacement
+as successful. A repeatably broken candidate is persisted in normal health and
+can enter another replacement cycle; unknown or unavailable probes remain
+pending. Healthy siblings in the same torrent or NZB are preserved. Missing
 files, missing Usenet segments, and unavailable provider links keep their
 existing repair behavior.
 
@@ -178,6 +182,7 @@ A failure to persist a single entry's health update is logged but never aborts t
 | `GET`    | `/api/repair/health/{name}`           | Per-entry health, including broken files and optional `cli_debrid_id`.   |
 | `POST`   | `/api/repair/health/{name}/check`     | Force-recheck this entry.                                                |
 | `POST`   | `/api/repair/replacements/ack`        | Remove one exact replaced playback-probe failure after collection.       |
+| `POST`   | `/api/repair/replacements/verify`     | Playback-validate one exact newly collected provider source.             |
 | `POST`   | `/api/repair/recheck/media`           | Recheck a single Arr media item. Body: `{arr, media_id, fix}`. Repairs run through Arr. |
 
 ### Examples
