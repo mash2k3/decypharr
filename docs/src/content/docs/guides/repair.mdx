@@ -129,16 +129,16 @@ Broken mounted-media reasons are stable API values:
 
 Non-media sidecars continue to use only the existing protocol probe.
 
-When cli_debrid replaces a file broken by `mount_read_error`,
-`media_probe_failed`, or `media_no_playable_stream`, collection is provisional.
-It asks cli_mount to validate the exact new provider hash and registered media
-item through this same mounted playback probe. Only a `healthy` result allows
-cli_debrid to acknowledge the accumulated old files and report the replacement
-as successful. A repeatably broken candidate is persisted in normal health and
-can enter another replacement cycle; unknown or unavailable probes remain
-pending. Healthy siblings in the same torrent or NZB are preserved. Missing
-files, missing Usenet segments, and unavailable provider links keep their
-existing repair behavior.
+For NZB replacements initiated by `mount_read_error`, `media_probe_failed`, or
+`media_no_playable_stream`, collection is provisional. cli_debrid asks
+cli_mount to validate the exact new NZB UUID and registered media item. The
+verification runs the Usenet article check first and then this mounted playback
+probe. Only a `healthy` result allows cli_debrid to acknowledge the accumulated
+old files and report the replacement as successful. A repeatably broken
+candidate, including one with missing Usenet segments, is persisted in normal
+health and can enter another protected replacement cycle; unknown or unavailable
+probes remain pending. Healthy siblings are preserved. Ordinary missing-file,
+missing-segment, provider-link, torrent, and matching behavior is unchanged.
 
 ### Sources
 

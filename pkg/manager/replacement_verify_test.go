@@ -16,6 +16,10 @@ func replacementVerifyFixture(t *testing.T) (*Repair, *storage.Storage) {
 	cfg := config.Get()
 	cfg.Mount.MountPath = t.TempDir()
 	repair.manager.config = cfg
+	repair.replacementNZBProbe = func(_ context.Context, _ *storage.Entry, _ string, res fileResult) fileResult {
+		res.healthy = true
+		return res
+	}
 	repair.mediaProbeSlots = make(chan struct{}, repairMediaProbeConcurrency)
 
 	file := &storage.File{Name: "S08E06.mkv", InfoHash: "new-hash", Size: 42}
@@ -28,6 +32,28 @@ func replacementVerifyFixture(t *testing.T) (*Repair, *storage.Storage) {
 		t.Fatal(err)
 	}
 	return repair, store
+}
+
+func TestVerifyReplacementRejectsMissingArticlesBeforeMediaProbe(t *testing.T) {
+	repair, store := replacementVerifyFixture(t)
+	repair.replacementNZBProbe = func(_ context.Context, _ *storage.Entry, _ string, res fileResult) fileResult {
+		res.broken = true
+		res.reason = "usenet_segment_missing"
+		return res
+	}
+	probeCalls := 0
+	repair.mediaProbeAttempt = func(context.Context, string) mediaProbeResult {
+		probeCalls++
+		return mediaProbeResult{state: mediaProbeHealthy}
+	}
+	result, err := repair.VerifyReplacement(context.Background(), ReplacementVerifyRequest{CliDebridID: 75299, InfoHash: "new-hash"})
+	if err != nil || result.Status != "broken" || result.Reason != "usenet_segment_missing" || probeCalls != 0 {
+		t.Fatalf("result=%#v err=%v probeCalls=%d", result, err, probeCalls)
+	}
+	health, err := store.GetEntryHealth("Chicago Med S08")
+	if err != nil || len(health.BrokenFiles) != 1 || health.BrokenFiles[0].Reason != "usenet_segment_missing" {
+		t.Fatalf("missing article result not persisted: %#v err=%v", health, err)
+	}
 }
 
 func TestVerifyReplacementPersistsBrokenCandidate(t *testing.T) {
@@ -103,7 +129,6 @@ func TestVerifyReplacementRejectsStaleAndNotReadyIdentifiers(t *testing.T) {
 		code string
 	}{
 		{"stale hash", ReplacementVerifyRequest{CliDebridID: 75299, InfoHash: "wrong-hash"}, "stale_target"},
-		{"not registered", ReplacementVerifyRequest{CliDebridID: 88888, InfoHash: "new-hash"}, "replacement_not_ready"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -113,6 +138,14 @@ func TestVerifyReplacementRejectsStaleAndNotReadyIdentifiers(t *testing.T) {
 				t.Fatalf("error=%#v want=%q", err, tt.code)
 			}
 		})
+	}
+}
+
+func TestVerifyReplacementMissingRegistrationIsUnknown(t *testing.T) {
+	repair, _ := replacementVerifyFixture(t)
+	result, err := repair.VerifyReplacement(context.Background(), ReplacementVerifyRequest{CliDebridID: 88888, InfoHash: "new-hash"})
+	if err != nil || result.Status != "unknown" || result.Reason != "replacement_not_ready" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 

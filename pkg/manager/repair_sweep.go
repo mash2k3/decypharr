@@ -1184,6 +1184,7 @@ var replacementCleanupReasons = map[string]struct{}{
 	"mount_read_error":         {},
 	"media_probe_failed":       {},
 	"media_no_playable_stream": {},
+	"usenet_segment_missing":   {},
 }
 
 type replacementVerifyTarget struct {
@@ -1200,6 +1201,8 @@ type replacementVerifyTarget struct {
 // deliberately left unknown.
 func (r *Repair) VerifyReplacement(ctx context.Context, req ReplacementVerifyRequest) (*ReplacementVerifyResult, error) {
 	req.InfoHash = strings.TrimSpace(req.InfoHash)
+	r.logger.Info().Int64("cli_debrid_id", req.CliDebridID).Str("info_hash", req.InfoHash).
+		Msg("Replacement verification requested")
 	if req.CliDebridID <= 0 || req.InfoHash == "" {
 		return nil, &ReplacementAckError{Code: "invalid_request", Message: "a positive cli_debrid_id and info_hash are required"}
 	}
@@ -1220,10 +1223,44 @@ func (r *Repair) VerifyReplacement(ctx context.Context, req ReplacementVerifyReq
 
 	target, err := r.resolveReplacementVerifyTarget(req)
 	if err != nil {
+		var verifyErr *ReplacementAckError
+		if errors.As(err, &verifyErr) && verifyErr.Code == "replacement_not_ready" {
+			return &ReplacementVerifyResult{Status: "unknown", Reason: "replacement_not_ready"}, nil
+		}
 		return nil, err
 	}
+	r.logger.Info().Int64("cli_debrid_id", req.CliDebridID).Str("info_hash", req.InfoHash).
+		Str("entry_name", target.entryName).Str("file_name", target.fileName).
+		Msg("Resolved replacement mounted file")
 	if !utils.IsMediaFile(target.fileName) {
 		return nil, &ReplacementAckError{Code: "unsupported_media", Message: "replacement playback verification requires a recognized media file"}
+	}
+	if !target.entry.IsNZB() {
+		return nil, &ReplacementAckError{Code: "unsupported_protocol", Message: "replacement verification is limited to NZB media"}
+	}
+
+	// A replacement must first pass the same authoritative article check used
+	// by normal repair sweeps. Readable cached bytes alone must not allow an NZB
+	// with missing articles to be reported as a working replacement.
+	providerProbe := r.probeNZBFile
+	if r.replacementNZBProbe != nil {
+		providerProbe = r.replacementNZBProbe
+	}
+	provider := providerProbe(ctx, target.entry, target.fileName, fileResult{
+		name: target.fileName, infoHash: target.entry.InfoHash,
+		protocol: target.entry.Protocol, cliDebridID: req.CliDebridID,
+	})
+	if provider.broken {
+		probe := mediaProbeResult{state: mediaProbeBroken, reason: provider.reason}
+		r.persistReplacementVerification(target, probe, time.Now())
+		result := &ReplacementVerifyResult{Status: "broken", Reason: provider.reason, EntryName: target.entryName, FileName: target.fileName}
+		r.logger.Warn().Str("status", result.Status).Str("reason", result.Reason).
+			Str("entry_name", target.entryName).Str("file_name", target.fileName).
+			Msg("Replacement verification completed")
+		return result, nil
+	}
+	if !provider.healthy {
+		return &ReplacementVerifyResult{Status: "unknown", Reason: provider.reason, EntryName: target.entryName, FileName: target.fileName}, nil
 	}
 	path, ok := mountedMediaPath(r.manager.config.Mount.MountPath, target.entryName, target.fileName)
 	if !ok {
@@ -1241,6 +1278,9 @@ func (r *Repair) VerifyReplacement(ctx context.Context, req ReplacementVerifyReq
 	default:
 		result.Status = "unknown"
 	}
+	r.logger.Info().Str("status", result.Status).Str("reason", result.Reason).
+		Str("entry_name", target.entryName).Str("file_name", target.fileName).
+		Msg("Replacement verification completed")
 	return result, nil
 }
 
@@ -1343,6 +1383,9 @@ func (r *Repair) AcknowledgeReplacement(req ReplacementAckRequest) (*Replacement
 	if req.EntryName == "" || req.FileName == "" || req.InfoHash == "" || req.CliDebridID <= 0 {
 		return nil, &ReplacementAckError{Code: "invalid_request", Message: "entry_name, file_name, info_hash, and a positive cli_debrid_id are required"}
 	}
+	r.logger.Info().Int64("cli_debrid_id", req.CliDebridID).Str("info_hash", req.InfoHash).
+		Str("entry_name", req.EntryName).Str("file_name", req.FileName).
+		Msg("Exact replacement cleanup acknowledgement requested")
 	if _, ok := replacementCleanupReasons[req.Reason]; !ok {
 		return nil, &ReplacementAckError{Code: "unsupported_reason", Message: "replacement cleanup is only allowed for unreadable or unplayable media"}
 	}

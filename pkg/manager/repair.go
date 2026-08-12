@@ -114,6 +114,9 @@ type Repair struct {
 	// mediaProbeAttempt is replaceable by tests. Production uses the real
 	// mounted-file read + ffprobe implementation from media_probe.go.
 	mediaProbeAttempt func(context.Context, string) mediaProbeResult
+	// replacementNZBProbe is a narrow test seam for the provider/article gate.
+	// Production leaves it nil and uses probeNZBFile directly.
+	replacementNZBProbe func(context.Context, *storage.Entry, string, fileResult) fileResult
 
 	mu                  sync.Mutex
 	parentCtx           context.Context

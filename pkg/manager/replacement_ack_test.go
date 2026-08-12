@@ -112,7 +112,6 @@ func TestAcknowledgeReplacementRejectsUnsafeTargets(t *testing.T) {
 		req  ReplacementAckRequest
 		code string
 	}{
-		{"legacy reason", ReplacementAckRequest{EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "old-hash", CliDebridID: 75299, Reason: "usenet_segment_missing"}, "unsupported_reason"},
 		{"wrong id", ReplacementAckRequest{EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "old-hash", CliDebridID: 999, Reason: "mount_read_error"}, "stale_target"},
 		{"wrong hash", ReplacementAckRequest{EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "new-hash", CliDebridID: 75299, Reason: "mount_read_error"}, "stale_target"},
 	}
@@ -124,6 +123,26 @@ func TestAcknowledgeReplacementRejectsUnsafeTargets(t *testing.T) {
 				t.Fatalf("error = %#v, want code %q", err, tt.code)
 			}
 		})
+	}
+}
+
+func TestAcknowledgeReplacementAllowsProtectedMissingSegmentCandidate(t *testing.T) {
+	repair, store := replacementAckFixture(t)
+	health, err := store.GetEntryHealth("The Sopranos S03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.BrokenFiles[0].Reason = "usenet_segment_missing"
+	health.FailureReason = "usenet_segment_missing"
+	if err := store.SaveEntryHealth(health); err != nil {
+		t.Fatal(err)
+	}
+	result, err := repair.AcknowledgeReplacement(ReplacementAckRequest{
+		EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "old-hash",
+		CliDebridID: 75299, Reason: "usenet_segment_missing",
+	})
+	if err != nil || result.Status != "removed" {
+		t.Fatalf("result=%#v err=%v", result, err)
 	}
 }
 
