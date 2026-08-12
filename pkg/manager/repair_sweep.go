@@ -1180,6 +1180,121 @@ func isAlreadyClearedFileError(err error) bool {
 		strings.Contains(msg, "file is deleted")
 }
 
+var replacementCleanupReasons = map[string]struct{}{
+	"mount_read_error":         {},
+	"media_probe_failed":       {},
+	"media_no_playable_stream": {},
+}
+
+// AcknowledgeReplacement removes exactly one locally-unplayable mounted file
+// after cli_debrid has collected its replacement. It intentionally does not
+// share ClearBroken's entry-wide behavior: healthy siblings in a pack remain
+// active, and legacy missing-provider/article repair paths are unaffected.
+func (r *Repair) AcknowledgeReplacement(req ReplacementAckRequest) (*ReplacementAckResult, error) {
+	req.EntryName = strings.TrimSpace(req.EntryName)
+	req.FileName = strings.TrimSpace(req.FileName)
+	req.InfoHash = strings.TrimSpace(req.InfoHash)
+	req.Reason = strings.TrimSpace(req.Reason)
+	if req.EntryName == "" || req.FileName == "" || req.InfoHash == "" || req.CliDebridID <= 0 {
+		return nil, &ReplacementAckError{Code: "invalid_request", Message: "entry_name, file_name, info_hash, and a positive cli_debrid_id are required"}
+	}
+	if _, ok := replacementCleanupReasons[req.Reason]; !ok {
+		return nil, &ReplacementAckError{Code: "unsupported_reason", Message: "replacement cleanup is only allowed for unreadable or unplayable media"}
+	}
+
+	// Serialize with repair-run startup. Holding this lock through the small
+	// storage mutation prevents a sweep from rewriting the same health record.
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.activeRunID != "" {
+		return nil, &ReplacementAckError{Code: "repair_busy", Message: fmt.Sprintf("repair run %s is active", r.activeRunID)}
+	}
+
+	item, err := r.manager.storage.GetEntryItem(req.EntryName)
+	if err != nil || item == nil {
+		return &ReplacementAckResult{Status: "already_removed", EntryDeleted: true}, nil
+	}
+	file, exists := item.Files[req.FileName]
+	if !exists || file == nil {
+		return &ReplacementAckResult{Status: "already_removed", EntryDeleted: false}, nil
+	}
+	if file.InfoHash != req.InfoHash {
+		return nil, &ReplacementAckError{Code: "stale_target", Message: "mounted file no longer belongs to the supplied info_hash"}
+	}
+
+	entry, err := r.manager.GetEntry(req.InfoHash)
+	if err != nil || entry == nil {
+		return nil, &ReplacementAckError{Code: "stale_target", Message: "provider entry is missing while the mounted file is still active"}
+	}
+	if entry.CliDebridIDs[req.FileName] != req.CliDebridID {
+		return nil, &ReplacementAckError{Code: "stale_target", Message: "cli_debrid_id does not match the mounted file registration"}
+	}
+
+	health, _ := r.manager.storage.GetEntryHealth(req.EntryName)
+	if health != nil && len(health.BrokenFiles) > 0 {
+		matched := false
+		for _, bf := range health.BrokenFiles {
+			if bf.FileName == req.FileName && bf.InfoHash == req.InfoHash && bf.CliDebridID == req.CliDebridID {
+				if bf.Reason != req.Reason {
+					return nil, &ReplacementAckError{Code: "stale_target", Message: "stored broken reason no longer matches the acknowledgement"}
+				}
+				matched = true
+				break
+			}
+		}
+		if !matched {
+			return nil, &ReplacementAckError{Code: "stale_target", Message: "file is not the currently registered broken target"}
+		}
+	}
+	finishHealthCleanup := func(entryDeleted bool) {
+		if health == nil || entryDeleted {
+			return
+		}
+		remaining := make([]storage.BrokenFile, 0, len(health.BrokenFiles))
+		for _, bf := range health.BrokenFiles {
+			if bf.FileName == req.FileName && bf.InfoHash == req.InfoHash && bf.CliDebridID == req.CliDebridID {
+				continue
+			}
+			remaining = append(remaining, bf)
+		}
+		health.LastRepairAt = time.Now()
+		health.BrokenFiles = remaining
+		health.BrokenCount = len(remaining)
+		if len(remaining) == 0 {
+			r.markBrokenHealthCleared(health, health.LastRepairAt)
+		} else {
+			health.Status = storage.HealthBroken
+			health.FailureReason = topReason(remaining)
+			r.saveHealth(health)
+		}
+	}
+	if file.Deleted {
+		finishHealthCleanup(false)
+		return &ReplacementAckResult{Status: "already_removed", EntryDeleted: false}, nil
+	}
+
+	activeFiles := 0
+	for _, candidate := range item.Files {
+		if candidate != nil && !candidate.Deleted {
+			activeFiles++
+		}
+	}
+	entryDeleted := activeFiles == 1
+	if err := r.manager.RemoveTorrentFile(req.EntryName, req.FileName); err != nil {
+		if isAlreadyClearedFileError(err) {
+			return &ReplacementAckResult{Status: "already_removed", EntryDeleted: entryDeleted}, nil
+		}
+		return nil, fmt.Errorf("remove replaced mounted file: %w", err)
+	}
+
+	finishHealthCleanup(entryDeleted)
+
+	r.logger.Info().Str("entry", req.EntryName).Str("file", req.FileName).
+		Str("infohash", req.InfoHash).Int64("cli_debrid_id", req.CliDebridID).
+		Bool("entry_deleted", entryDeleted).Msg("Acknowledged collected replacement and removed old mounted file")
+	return &ReplacementAckResult{Status: "removed", EntryDeleted: entryDeleted}, nil
+}
+
 // FixBroken triggers the Arr delete + re-search pass on currently-broken
 // entries without reprobing. When names is empty, every entry with
 // Status=broken in storage is fixed. Returns the new RepairRun record

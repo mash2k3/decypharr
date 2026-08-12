@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -967,6 +968,35 @@ func (s *Server) handleClearBroken(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	utils.JSONResponse(w, run, http.StatusOK)
+}
+
+func (s *Server) handleAcknowledgeReplacement(w http.ResponseWriter, r *http.Request) {
+	var req manager.ReplacementAckRequest
+	if err := json.ConfigDefault.NewDecoder(r.Body).Decode(&req); err != nil {
+		utils.JSONResponse(w, map[string]string{"code": "invalid_request", "message": "invalid JSON body"}, http.StatusBadRequest)
+		return
+	}
+	svc := s.manager.Repair()
+	if svc == nil {
+		utils.JSONResponse(w, map[string]string{"code": "repair_unavailable", "message": "repair service not available"}, http.StatusServiceUnavailable)
+		return
+	}
+	result, err := svc.AcknowledgeReplacement(req)
+	if err != nil {
+		var ackErr *manager.ReplacementAckError
+		if errors.As(err, &ackErr) {
+			status := http.StatusConflict
+			if ackErr.Code == "invalid_request" || ackErr.Code == "unsupported_reason" {
+				status = http.StatusBadRequest
+			}
+			utils.JSONResponse(w, map[string]string{"code": ackErr.Code, "message": ackErr.Message}, status)
+			return
+		}
+		s.logger.Error().Err(err).Msg("Failed to acknowledge cli_debrid replacement")
+		utils.JSONResponse(w, map[string]string{"code": "cleanup_failed", "message": err.Error()}, http.StatusInternalServerError)
+		return
+	}
+	utils.JSONResponse(w, result, http.StatusOK)
 }
 
 func (s *Server) handleClearRepairState(w http.ResponseWriter, r *http.Request) {

@@ -48,6 +48,29 @@ type ClearRepairStateResult struct {
 	Cleared  int                    `json:"cleared"`
 }
 
+// ReplacementAckRequest identifies one old mounted file that cli_debrid has
+// successfully replaced. All fields are required so a delayed acknowledgement
+// can never remove a different file that later reused the same display name.
+type ReplacementAckRequest struct {
+	EntryName   string `json:"entry_name"`
+	FileName    string `json:"file_name"`
+	InfoHash    string `json:"info_hash"`
+	CliDebridID int64  `json:"cli_debrid_id"`
+	Reason      string `json:"reason"`
+}
+
+type ReplacementAckResult struct {
+	Status       string `json:"status"`
+	EntryDeleted bool   `json:"entry_deleted"`
+}
+
+type ReplacementAckError struct {
+	Code    string
+	Message string
+}
+
+func (e *ReplacementAckError) Error() string { return e.Message }
+
 const (
 	repairSchedulerTag     = "repair-sweep"
 	repairStopSchedulerTag = "repair-sweep-stop"
