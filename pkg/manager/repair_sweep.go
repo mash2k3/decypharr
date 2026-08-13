@@ -1413,32 +1413,40 @@ func (r *Repair) AcknowledgeReplacement(req ReplacementAckRequest) (*Replacement
 		return nil, &ReplacementAckError{Code: "stale_target", Message: "mounted file no longer belongs to the supplied info_hash"}
 	}
 
-	entry, err := r.manager.GetEntry(req.InfoHash)
-	if err != nil || entry == nil {
-		return nil, &ReplacementAckError{Code: "stale_target", Message: "provider entry is missing while the mounted file is still active"}
-	}
-	if entry.CliDebridIDs[req.FileName] != req.CliDebridID {
-		return nil, &ReplacementAckError{Code: "stale_target", Message: "cli_debrid_id does not match the mounted file registration"}
-	}
-
 	health, _ := r.manager.storage.GetEntryHealth(req.EntryName)
-	if health != nil && len(health.BrokenFiles) > 0 {
-		matched := false
+	healthMatched := false
+	if health != nil {
 		for _, bf := range health.BrokenFiles {
-			if bf.FileName == req.FileName && bf.InfoHash == req.InfoHash && bf.CliDebridID == req.CliDebridID {
-				if bf.Reason != req.Reason {
-					return nil, &ReplacementAckError{Code: "stale_target", Message: "stored broken reason no longer matches the acknowledgement"}
-				}
-				matched = true
+			if bf.EntryName == req.EntryName && bf.FileName == req.FileName &&
+				bf.InfoHash == req.InfoHash && bf.CliDebridID == req.CliDebridID &&
+				bf.Reason == req.Reason {
+				healthMatched = true
 				break
 			}
 		}
-		if !matched {
+		if len(health.BrokenFiles) > 0 && !healthMatched {
 			return nil, &ReplacementAckError{Code: "stale_target", Message: "file is not the currently registered broken target"}
 		}
 	}
+
+	entry, entryErr := r.manager.GetEntry(req.InfoHash)
+	providerMissing := entryErr != nil || entry == nil
+	if providerMissing {
+		// Completed/retained files can outlive their provider Entry.  In that
+		// case the exact persisted broken-file identity is the only safe cleanup
+		// authority; never fall back to a name or partial match.
+		if !healthMatched {
+			return nil, &ReplacementAckError{Code: "stale_target", Message: "provider entry is missing and no exact broken health record authorizes cleanup"}
+		}
+	} else if entry.CliDebridIDs[req.FileName] != req.CliDebridID {
+		return nil, &ReplacementAckError{Code: "stale_target", Message: "cli_debrid_id does not match the mounted file registration"}
+	}
 	finishHealthCleanup := func(entryDeleted bool) {
-		if health == nil || entryDeleted {
+		if health == nil {
+			return
+		}
+		if entryDeleted {
+			_ = r.manager.storage.DeleteEntryHealth(req.EntryName)
 			return
 		}
 		remaining := make([]storage.BrokenFile, 0, len(health.BrokenFiles))
@@ -1471,11 +1479,20 @@ func (r *Repair) AcknowledgeReplacement(req ReplacementAckRequest) (*Replacement
 		}
 	}
 	entryDeleted := activeFiles == 1
-	if err := r.manager.RemoveTorrentFile(req.EntryName, req.FileName); err != nil {
-		if isAlreadyClearedFileError(err) {
+	var removeErr error
+	if providerMissing && entryDeleted {
+		// RemoveTorrentFile eventually calls DeleteEntry for the final file,
+		// which cannot succeed when the provider Entry is already absent.
+		// The exact EntryItem is the mounted object that remains in this case.
+		removeErr = r.manager.storage.DeleteEntryItemByName(req.EntryName)
+	} else {
+		removeErr = r.manager.RemoveTorrentFile(req.EntryName, req.FileName)
+	}
+	if removeErr != nil {
+		if isAlreadyClearedFileError(removeErr) {
 			return &ReplacementAckResult{Status: "already_removed", EntryDeleted: entryDeleted}, nil
 		}
-		return nil, fmt.Errorf("remove replaced mounted file: %w", err)
+		return nil, fmt.Errorf("remove replaced mounted file: %w", removeErr)
 	}
 
 	finishHealthCleanup(entryDeleted)

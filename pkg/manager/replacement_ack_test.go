@@ -126,6 +126,95 @@ func TestAcknowledgeReplacementRejectsUnsafeTargets(t *testing.T) {
 	}
 }
 
+func TestAcknowledgeReplacementUsesExactHealthWhenProviderEntryIsMissing(t *testing.T) {
+	repair, store := replacementAckFixture(t)
+	// Simulate a retained mounted item whose provider Entry has already gone.
+	if err := store.Delete("old-hash"); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := &storage.File{Name: "S03E01.mkv", InfoHash: "old-hash", Size: 10}
+	sibling := &storage.File{Name: "S03E02.mkv", InfoHash: "old-hash", Size: 20}
+	if err := store.UpdateItem(&storage.EntryItem{
+		Name: "The Sopranos S03", Size: 30,
+		Files: map[string]*storage.File{oldFile.Name: oldFile, sibling.Name: sibling},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repair.AcknowledgeReplacement(ReplacementAckRequest{
+		EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "old-hash",
+		CliDebridID: 75299, Reason: "mount_read_error",
+	})
+	if err != nil || result.Status != "removed" || result.EntryDeleted {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	item, err := store.GetEntryItem("The Sopranos S03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !item.Files["S03E01.mkv"].Deleted || item.Files["S03E02.mkv"].Deleted {
+		t.Fatalf("orphan cleanup changed the wrong files: %#v", item.Files)
+	}
+}
+
+func TestAcknowledgeReplacementRejectsMissingProviderWithoutExactHealth(t *testing.T) {
+	repair, store := replacementAckFixture(t)
+	if err := store.Delete("old-hash"); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := &storage.File{Name: "S03E01.mkv", InfoHash: "old-hash", Size: 10}
+	if err := store.UpdateItem(&storage.EntryItem{
+		Name: "The Sopranos S03", Files: map[string]*storage.File{oldFile.Name: oldFile},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	health, err := store.GetEntryHealth("The Sopranos S03")
+	if err != nil {
+		t.Fatal(err)
+	}
+	health.BrokenFiles[0].CliDebridID = 999
+	if err := store.SaveEntryHealth(health); err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = repair.AcknowledgeReplacement(ReplacementAckRequest{
+		EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "old-hash",
+		CliDebridID: 75299, Reason: "mount_read_error",
+	})
+	var ackErr *ReplacementAckError
+	if !errors.As(err, &ackErr) || ackErr.Code != "stale_target" {
+		t.Fatalf("error=%#v, want stale_target", err)
+	}
+}
+
+func TestAcknowledgeReplacementDeletesFinalOrphanedMountedEntry(t *testing.T) {
+	repair, store := replacementAckFixture(t)
+	if err := store.Delete("old-hash"); err != nil {
+		t.Fatal(err)
+	}
+	oldFile := &storage.File{Name: "S03E01.mkv", InfoHash: "old-hash", Size: 10}
+	if err := store.UpdateItem(&storage.EntryItem{
+		Name: "The Sopranos S03", Size: 10,
+		Files: map[string]*storage.File{oldFile.Name: oldFile},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	result, err := repair.AcknowledgeReplacement(ReplacementAckRequest{
+		EntryName: "The Sopranos S03", FileName: "S03E01.mkv", InfoHash: "old-hash",
+		CliDebridID: 75299, Reason: "mount_read_error",
+	})
+	if err != nil || result.Status != "removed" || !result.EntryDeleted {
+		t.Fatalf("result=%#v err=%v", result, err)
+	}
+	if _, err := store.GetEntryItem("The Sopranos S03"); err == nil {
+		t.Fatal("orphaned mounted entry still exists")
+	}
+	if health, _ := store.GetEntryHealth("The Sopranos S03"); health != nil {
+		t.Fatalf("orphaned health still exists: %#v", health)
+	}
+}
+
 func TestAcknowledgeReplacementAllowsProtectedMissingSegmentCandidate(t *testing.T) {
 	repair, store := replacementAckFixture(t)
 	health, err := store.GetEntryHealth("The Sopranos S03")
