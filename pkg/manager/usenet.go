@@ -293,6 +293,41 @@ func (m *Manager) purgeOrphanNZBQueueEntries() {
 	}
 }
 
+// purgeCompletedQueueEntriesWithoutStorage removes completed queue rows whose
+// mount/storage entry is already gone. This catches ghosts left when browse
+// delete removed entries.db but queue.db was never updated (common before
+// DeleteEntry also cleaned queue.db).
+func (m *Manager) purgeCompletedQueueEntriesWithoutStorage() {
+	entries := m.queue.ListFilter("", config.ProtocolAll, "", nil, "", false)
+	if len(entries) == 0 {
+		return
+	}
+
+	purged := 0
+	for _, entry := range entries {
+		if entry == nil || entry.InfoHash == "" {
+			continue
+		}
+		if entry.State != storage.EntryStatePausedUP && !entry.IsComplete {
+			continue
+		}
+		exists, err := m.EntryExists(entry.InfoHash)
+		if err != nil || exists {
+			continue
+		}
+		if err := m.queue.DeleteEntryOnly(entry.InfoHash); err != nil {
+			m.logger.Warn().Err(err).Str("name", entry.Name).Str("id", entry.InfoHash).Msg("Failed to purge completed queue entry without storage")
+		} else {
+			m.logger.Info().Str("name", entry.Name).Str("id", entry.InfoHash).Msg("Purged completed queue entry with no storage row")
+			purged++
+		}
+	}
+
+	if purged > 0 {
+		m.logger.Info().Int("purged", purged).Msg("Purged completed queue entries missing from storage")
+	}
+}
+
 func (m *Manager) syncNZBs(ctx context.Context) error {
 	if m.usenet == nil {
 		return nil

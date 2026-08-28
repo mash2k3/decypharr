@@ -421,6 +421,7 @@ func (m *Manager) Start(ctx context.Context) error {
 		// references from a previous instance (e.g. after migrating from decypharr
 		// to cli_mount). They would otherwise stall at 0% indefinitely.
 		m.purgeOrphanNZBQueueEntries()
+		m.purgeCompletedQueueEntriesWithoutStorage()
 		if fixNZB := os.Getenv("DECYPHARR_FIX_NZB_SIZES"); fixNZB == "1" {
 			m.logger.Info().Msg("Starting NZB file size correction as requested by environment variable")
 			m.fixNZBFileSizes(ctx)
@@ -931,6 +932,14 @@ func (m *Manager) DeleteEntry(infohash string, removePlacements bool) error {
 
 	if err := m.storage.Delete(infohash); err != nil {
 		return err
+	}
+
+	// Browse/mount deletion previously only removed entries.db rows, leaving
+	// completed jobs as ghosts in queue.db (ffprobe reject, repair teardown,
+	// manual browse delete, etc.). Best-effort queue cleanup here keeps both
+	// stores aligned.
+	if err := m.queue.DeleteEntryOnly(infohash); err != nil {
+		m.logger.Debug().Err(err).Str("infohash", infohash).Msg("Queue entry already absent after storage delete")
 	}
 
 	// Clean up NZB metadata so WebDAV stops serving the file path after deletion
