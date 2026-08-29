@@ -117,6 +117,23 @@ type Downloaders struct {
 	// Circuit breaker - blocks all requests when max errors reached
 	circuitOpen   atomic.Bool  // True when circuit is "open" (blocking all requests)
 	circuitOpenAt atomic.Int64 // Unix nano timestamp when circuit opened
+
+	// interactiveProbe excludes probe-sized reads from interactive reserve detection.
+	interactiveProbe atomic.Bool
+}
+
+// RecordPlaybackActivity keeps interactive reserve alive during cache-served reads.
+func (dls *Downloaders) RecordPlaybackActivity(bytesRead, off, readSize, fileSize int64) {
+	if dls == nil || dls.manager == nil || bytesRead <= 0 {
+		return
+	}
+	dls.mu.Lock()
+	streamID := dls.streamID
+	dls.mu.Unlock()
+	if streamID == "" {
+		return
+	}
+	dls.manager.RecordStreamActivity(streamID, bytesRead, 0, isProbeRead(off, readSize, fileSize))
 }
 
 // ensureStreamTrackedLocked makes sure the active stream is registered when
@@ -282,6 +299,10 @@ func (dls *Downloaders) Download(ctx context.Context, r ranges.Range) error {
 // downloader with no read-ahead extension so they are not starved behind bulk
 // sequential prefetch under high connection load.
 func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range, priority bool) error {
+	if priority {
+		dls.interactiveProbe.Store(true)
+		defer dls.interactiveProbe.Store(false)
+	}
 	// Circuit breaker: reject immediately if circuit is open
 	if dls.isCircuitOpen() {
 		lastErr := dls.getLastErr()
@@ -1448,6 +1469,9 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	actuallyWritten := int64(n - skipped)
 	w.written += actuallyWritten
 
+	if n > 0 && w.dl.dls.manager != nil {
+		w.dl.dls.manager.RecordStreamActivity(w.dl.dls.streamID, int64(n), actuallyWritten, w.dl.dls.interactiveProbe.Load())
+	}
 	if actuallyWritten > 0 {
 		w.dl.dls.item.cache.AddDownloadedBytes(actuallyWritten)
 		if w.dl.dls.waiterCount.Load() > 0 {

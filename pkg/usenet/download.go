@@ -40,8 +40,10 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 	var completedSegments atomic.Int64
 	var downloadedBytes atomic.Int64
 
+	processingConns := u.EffectiveProcessingMaxConnections()
+
 	// Channel for segment results - buffered to allow parallel fetching ahead
-	resultChan := make(chan segmentResult, max(u.processingMaxConnections, 1)*2)
+	resultChan := make(chan segmentResult, max(processingConns, 1)*2)
 
 	// Map to hold out-of-order segments waiting to be written
 	pendingSegments := make(map[int][]byte)
@@ -99,7 +101,7 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 				if progressCallback != nil {
 					// Estimate speed (rough: assume ~1s per segment batch)
 					completed := completedSegments.Load()
-					speed := downloaded / max(1, completed) * int64(max(u.processingMaxConnections, 1))
+					speed := downloaded / max(1, completed) * int64(max(processingConns, 1))
 					progressCallback(downloaded, speed)
 				}
 
@@ -110,7 +112,7 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 	}()
 
 	// Fetch segments in parallel
-	p := pool.New().WithContext(ctx).WithMaxGoroutines(max(u.processingMaxConnections, 1))
+	p := pool.New().WithContext(ctx).WithMaxGoroutines(max(processingConns, 1))
 
 	for idx, segment := range file.Segments {
 		segIdx := idx
@@ -132,7 +134,8 @@ func (u *Usenet) Download(ctx context.Context, nzoID, filename string, writer io
 
 			// Fetch segment using manager with failover
 			var data []byte
-			err := u.nntp.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
+			bgCtx := nntp.WithWorkClass(ctx, nntp.WorkClassBackground)
+			err := u.nntp.ExecuteWithFailover(bgCtx, func(conn *nntp.Connection) error {
 				d, e := conn.GetDecodedBody(seg.MessageID)
 				data = d
 				return e

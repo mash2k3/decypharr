@@ -93,7 +93,7 @@ func (f *File) Open(ctx context.Context, flags uint32) (fs.FileHandle, uint32, s
 		// Warm the head/tail segment cache in the background so it's already
 		// available by the time the client's first Read() lands, instead of
 		// that Read() paying full cold NNTP fetch+decode latency itself.
-		if f.info.ActiveDebrid() == "usenet" {
+		if f.config.UsenetPreCacheOnOpen && f.info.ActiveDebrid() == "usenet" {
 			go func(info *manager.FileInfo) {
 				if mgr := f.vfs.Manager(); mgr != nil {
 					if err := mgr.PreCacheUsenetFile(context.Background(), info.InfoHash(), info.Name()); err != nil {

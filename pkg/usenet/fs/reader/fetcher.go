@@ -201,6 +201,11 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 
 	downloadCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
+	class := nntp.WorkClassStream
+	if nntp.WorkClassIsExplicitlyBackground(ctx) {
+		class = nntp.WorkClassBackground
+	}
+	downloadCtx = nntp.WithWorkClass(downloadCtx, class)
 
 	// ExecuteWithFailover already retries per provider and across providers —
 	// a single call is sufficient.  An outer retry loop would multiply the
@@ -355,7 +360,7 @@ func (sf *SegmentFetcher) prefetchOne(segIdx int) {
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(sf.ctx, sf.config.DownloadTimeout)
+	fetchCtx, cancel := context.WithTimeout(nntp.WithWorkClass(sf.ctx, nntp.WorkClassBackground), sf.config.DownloadTimeout)
 	err := sf.Fetch(fetchCtx, segIdx)
 	cancel()
 

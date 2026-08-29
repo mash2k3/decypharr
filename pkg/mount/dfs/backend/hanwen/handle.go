@@ -14,6 +14,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
 )
 
@@ -83,7 +84,11 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 			if fh.file.vfs != nil {
 				if mgr := fh.file.vfs.Manager(); mgr != nil {
 					info := fh.file.info
-					mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
+					if !nntp.IsPoolCapacityError(err) {
+						mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
+					} else {
+						fh.logger.Warn().Err(err).Str("file", info.Name()).Msg("Read failed due to NNTP pool contention; not marking broken")
+					}
 				}
 			}
 			return nil, syscall.EIO

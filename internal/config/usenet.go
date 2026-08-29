@@ -69,6 +69,32 @@ type Usenet struct {
 	// the streaming reader queues for read-ahead. Default 0 -> 8 (prior
 	// hardcoded value).
 	PrefetchAheadSegments int `json:"prefetch_ahead_segments,omitempty"`
+	// PreCacheOnOpen pre-fetches the head and tail of a Usenet file whenever
+	// the mount receives an open. Keep this opt-in: library scanners can open
+	// many newly-added episodes at once and otherwise compete with playback
+	// for the shared NNTP connection pool.
+	PreCacheOnOpen bool `json:"pre_cache_on_open,omitempty"`
+	// InteractivePoolReserveEnabled opts into dynamic NNTP pool reservation during
+	// sustained playback reads. When active, background parse/repair/stat work is
+	// capped so streaming keeps headroom. Default off.
+	InteractivePoolReserveEnabled bool `json:"interactive_pool_reserve_enabled,omitempty"`
+	// InteractivePoolReservePercent is the share of total provider slots to hold
+	// per active stream when reserve mode is active (default 15).
+	InteractivePoolReservePercent int `json:"interactive_pool_reserve_percent,omitempty"`
+	// InteractivePoolReservePerStream optionally overrides the computed per-stream
+	// reserve. When zero, derived from InteractivePoolReservePercent.
+	InteractivePoolReservePerStream int `json:"interactive_pool_reserve_per_stream,omitempty"`
+	// InteractivePoolReserveMin is the floor for computed reserve (default 6).
+	InteractivePoolReserveMin int `json:"interactive_pool_reserve_min,omitempty"`
+	// InteractivePoolReserveMax caps total reserve across all active streams (default 40).
+	InteractivePoolReserveMax int `json:"interactive_pool_reserve_max,omitempty"`
+	// InteractiveDetectBytes is how many qualifying bytes in the detect window
+	// trigger interactive mode (default 4MB).
+	InteractiveDetectBytes string `json:"interactive_detect_bytes,omitempty"`
+	// InteractiveDetectWindow is the sliding window for sustained-read detection.
+	InteractiveDetectWindow string `json:"interactive_detect_window,omitempty"`
+	// InteractiveIdleTimeout exits interactive mode after no qualifying reads.
+	InteractiveIdleTimeout string `json:"interactive_idle_timeout,omitempty"`
 	// SocketReadBuffer / SocketWriteBuffer set the per-connection TCP
 	// SO_RCVBUF / SO_SNDBUF (e.g. "4MB"). At high RTT a single connection's
 	// throughput is capped at roughly buffer ÷ RTT, so the receive buffer must
@@ -115,7 +141,81 @@ func (u Usenet) BufferMemoryBytes() int64 {
 }
 
 func (u Usenet) IsZero() bool {
-	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == ""
+	return len(u.Providers) == 0 && u.MaxConnections == 0 && u.ProcessingMaxConnections == 0 && u.ReadAhead == "" && u.ProcessingTimeout == "" && !u.PreCacheOnOpen && !u.InteractivePoolReserveEnabled
+}
+
+// InteractiveDetectBytesValue resolves the sustained-read byte threshold.
+func (u Usenet) InteractiveDetectBytesValue() int64 {
+	if u.InteractiveDetectBytes == "" {
+		return 4 << 20
+	}
+	n, err := ParseSize(u.InteractiveDetectBytes)
+	if err != nil || n <= 0 {
+		return 4 << 20
+	}
+	return n
+}
+
+// ComputeInteractiveReserve returns reserved slots for interactive work given
+// total provider connection capacity. Kept for backward compatibility.
+func ComputeInteractiveReserve(totalConnections, percent, minReserve, maxReserve int) int {
+	reserved, _ := ComputeDynamicInteractiveReserve(totalConnections, 1, percent, minReserve, maxReserve, 0)
+	return reserved
+}
+
+// ComputePerStreamReserveBase returns the per-stream reserve baseline from percent/min.
+func ComputePerStreamReserveBase(totalConnections, percent, minReserve int) int {
+	if totalConnections <= 0 {
+		return 0
+	}
+	if percent <= 0 {
+		percent = 15
+	}
+	if minReserve <= 0 {
+		minReserve = 6
+	}
+	reserve := (totalConnections*percent + 99) / 100
+	if reserve < minReserve {
+		reserve = minReserve
+	}
+	if reserve >= totalConnections {
+		return totalConnections
+	}
+	return reserve
+}
+
+// ComputeDynamicInteractiveReserve scales reserve by active playback streams.
+// perStreamOverride, when > 0, replaces the percent-derived per-stream baseline.
+func ComputeDynamicInteractiveReserve(totalConnections, activeStreams, percent, minReserve, maxTotal, perStreamOverride int) (reserved, perStream int) {
+	if totalConnections <= 0 || activeStreams <= 0 {
+		return 0, 0
+	}
+	if maxTotal <= 0 {
+		maxTotal = 40
+	}
+	perStream = perStreamOverride
+	if perStream <= 0 {
+		perStream = ComputePerStreamReserveBase(totalConnections, percent, minReserve)
+	}
+	reserved = perStream * activeStreams
+	if reserved < minReserve {
+		reserved = minReserve
+	}
+	if reserved > maxTotal {
+		reserved = maxTotal
+	}
+	if reserved >= totalConnections {
+		return totalConnections, perStream
+	}
+	return reserved, perStream
+}
+
+// InteractivePerStreamReserve resolves the configured per-stream reserve baseline.
+func (u Usenet) InteractivePerStreamReserve(totalConnections int) int {
+	if u.InteractivePoolReservePerStream > 0 {
+		return u.InteractivePoolReservePerStream
+	}
+	return ComputePerStreamReserveBase(totalConnections, u.InteractivePoolReservePercent, u.InteractivePoolReserveMin)
 }
 
 func (c *Config) updateUsenetConfig() {
@@ -158,6 +258,27 @@ func (c *Config) updateUsenetConfig() {
 		c.Usenet.ImportAvailabilitySamplePercent = 1
 	} else if c.Usenet.ImportAvailabilitySamplePercent > 100 {
 		c.Usenet.ImportAvailabilitySamplePercent = 100
+	}
+
+	if c.Usenet.InteractivePoolReservePercent <= 0 {
+		c.Usenet.InteractivePoolReservePercent = 15
+	} else if c.Usenet.InteractivePoolReservePercent > 100 {
+		c.Usenet.InteractivePoolReservePercent = 100
+	}
+	if c.Usenet.InteractivePoolReserveMin <= 0 {
+		c.Usenet.InteractivePoolReserveMin = 6
+	}
+	if c.Usenet.InteractivePoolReserveMax <= 0 {
+		c.Usenet.InteractivePoolReserveMax = 40
+	}
+	if c.Usenet.InteractiveDetectBytes == "" {
+		c.Usenet.InteractiveDetectBytes = "4MB"
+	}
+	if c.Usenet.InteractiveDetectWindow == "" {
+		c.Usenet.InteractiveDetectWindow = "5s"
+	}
+	if c.Usenet.InteractiveIdleTimeout == "" {
+		c.Usenet.InteractiveIdleTimeout = "30s"
 	}
 
 	if c.Usenet.DiskBufferPath == "" {
@@ -227,6 +348,41 @@ func (c *Config) applyUsenetEnvVars() {
 
 	if readAhead := getEnv("USENET__READ_AHEAD"); readAhead != "" {
 		c.Usenet.ReadAhead = readAhead
+	}
+	if preCacheOnOpen := getEnv("USENET__PRE_CACHE_ON_OPEN"); preCacheOnOpen != "" {
+		c.Usenet.PreCacheOnOpen = parseBool(preCacheOnOpen)
+	}
+	if v := getEnv("USENET__INTERACTIVE_POOL_RESERVE_ENABLED"); v != "" {
+		c.Usenet.InteractivePoolReserveEnabled = parseBool(v)
+	}
+	if v := getEnv("USENET__INTERACTIVE_POOL_RESERVE_PERCENT"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Usenet.InteractivePoolReservePercent = n
+		}
+	}
+	if v := getEnv("USENET__INTERACTIVE_POOL_RESERVE_PER_STREAM"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Usenet.InteractivePoolReservePerStream = n
+		}
+	}
+	if v := getEnv("USENET__INTERACTIVE_POOL_RESERVE_MIN"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Usenet.InteractivePoolReserveMin = n
+		}
+	}
+	if v := getEnv("USENET__INTERACTIVE_POOL_RESERVE_MAX"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil {
+			c.Usenet.InteractivePoolReserveMax = n
+		}
+	}
+	if v := getEnv("USENET__INTERACTIVE_DETECT_BYTES"); v != "" {
+		c.Usenet.InteractiveDetectBytes = v
+	}
+	if v := getEnv("USENET__INTERACTIVE_DETECT_WINDOW"); v != "" {
+		c.Usenet.InteractiveDetectWindow = v
+	}
+	if v := getEnv("USENET__INTERACTIVE_IDLE_TIMEOUT"); v != "" {
+		c.Usenet.InteractiveIdleTimeout = v
 	}
 
 	if v := getEnv("USENET__SOCKET_READ_BUFFER"); v != "" {

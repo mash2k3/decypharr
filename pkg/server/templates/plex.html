@@ -18,57 +18,129 @@
                 <i class="bi bi-play-circle mr-2 text-primary"></i>Plex
             </h2>
             <p class="text-sm opacity-70 mt-1">
-                Connect decypharr to Plex to prewarm the next episode's cache while a real viewer is watching.
-                decypharr polls Plex's own <code>/status/sessions</code> API for genuine active playback — once a
-                session crosses 70% through an episode, the next episode (if tracked by decypharr) gets its first
-                ~20% fetched into cache ahead of time, so it starts up faster if the viewer continues.
+                Connect decypharr to Plex using the same <code>/status/sessions</code> poll for
+                <strong>next-episode prewarm</strong> and <strong>playback protection</strong>.
+                Only confirmed Plex viewers count toward NNTP reserve — Bazarr and other mount readers do not.
             </p>
 
-            <form id="plexForm" class="mt-6 space-y-4 max-w-xl">
-                <div class="form-control">
-                    <label class="label cursor-pointer justify-start gap-3">
-                        <input type="checkbox" id="prewarmEnabled" class="toggle toggle-primary" />
-                        <span class="label-text font-medium">Enable next-episode prewarm</span>
-                    </label>
+            <form id="plexForm" class="mt-6 space-y-6 max-w-3xl">
+                <div class="space-y-4">
+                    <h3 class="font-semibold text-lg">Plex connection</h3>
+                    <div class="form-control">
+                        <label class="label" for="plexUrl">
+                            <span class="label-text font-medium">Plex Server URL</span>
+                        </label>
+                        <input type="text" id="plexUrl" placeholder="http://192.168.1.10:32400"
+                               class="input input-bordered w-full" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">Reachable from decypharr, not necessarily from your browser. Shared by prewarm and playback protection.</span>
+                        </label>
+                    </div>
+
+                    <div class="form-control">
+                        <label class="label" for="plexToken">
+                            <span class="label-text font-medium">Plex Token</span>
+                        </label>
+                        <input type="password" id="plexToken" placeholder="X-Plex-Token"
+                               class="input input-bordered w-full" autocomplete="off" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">
+                                <a class="link link-hover" href="https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/" target="_blank" rel="noopener">
+                                    How to find your Plex token
+                                </a>
+                            </span>
+                        </label>
+                    </div>
                 </div>
 
-                <div class="form-control">
-                    <label class="label" for="plexUrl">
-                        <span class="label-text font-medium">Plex Server URL</span>
-                    </label>
-                    <input type="text" id="plexUrl" placeholder="http://192.168.1.10:32400"
-                           class="input input-bordered w-full" />
-                    <label class="label">
-                        <span class="label-text-alt opacity-60">Reachable from decypharr, not necessarily from your browser.</span>
-                    </label>
+                <div class="divider">Next-episode prewarm</div>
+                <div class="space-y-4">
+                    <div class="form-control">
+                        <label class="label cursor-pointer justify-start gap-3">
+                            <input type="checkbox" id="prewarmEnabled" class="toggle toggle-primary" />
+                            <span class="label-text font-medium">Enable next-episode prewarm</span>
+                        </label>
+                        <p class="text-sm opacity-70 ml-12">Once a Plex session crosses ~70% of an episode, fetch the first ~20% of the next episode into cache.</p>
+                    </div>
+                    <div class="form-control">
+                        <label class="label" for="plexMaxSize">
+                            <span class="label-text font-medium">Prewarm size cap</span>
+                        </label>
+                        <input type="text" id="plexMaxSize" placeholder="256MB"
+                               class="input input-bordered w-full" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">Max bytes per next-episode prewarm. Leave blank for 256MB default.</span>
+                        </label>
+                    </div>
                 </div>
 
-                <div class="form-control">
-                    <label class="label" for="plexToken">
-                        <span class="label-text font-medium">Plex Token</span>
-                    </label>
-                    <input type="password" id="plexToken" placeholder="X-Plex-Token"
-                           class="input input-bordered w-full" autocomplete="off" />
-                    <label class="label">
-                        <span class="label-text-alt opacity-60">
-                            <a class="link link-hover" href="https://support.plex.tv/articles/204059436-finding-an-authentication-token-x-plex-token/" target="_blank" rel="noopener">
-                                How to find your Plex token
-                            </a>
-                        </span>
-                    </label>
-                </div>
+                <div class="divider">Playback protection</div>
+                <div class="space-y-4">
+                    <div class="form-control">
+                        <label class="label cursor-pointer justify-start gap-3">
+                            <input type="checkbox" id="playbackProtectionEnabled" class="checkbox checkbox-warning" />
+                            <span class="label-text">
+                                <span class="font-medium block">Protect Plex streams during playback</span>
+                                <span class="text-sm opacity-70">Reserves NNTP connections per confirmed Plex session only while bulk imports are running. Playback alone uses the full pool; Bazarr and pre-cache use the background budget when protection is active.</span>
+                            </span>
+                        </label>
+                    </div>
 
-                <div class="form-control">
-                    <label class="label" for="plexMaxSize">
-                        <span class="label-text font-medium">Prewarm size cap</span>
-                    </label>
-                    <input type="text" id="plexMaxSize" placeholder="256MB"
-                           class="input input-bordered w-full" />
-                    <label class="label">
-                        <span class="label-text-alt opacity-60">
-                            Max bytes fetched ahead of time per next-episode, e.g. "256MB", "1GB". Leave blank for the 256MB default.
-                        </span>
-                    </label>
+                    <div id="playbackProtectionFields" class="hidden space-y-4">
+                        <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            <div class="form-control">
+                                <label class="label" for="reservePercent">
+                                    <span class="label-text font-medium">Per-stream reserve (% of pool)</span>
+                                </label>
+                                <input type="number" id="reservePercent" class="input input-bordered w-full" min="1" max="100" placeholder="15" />
+                                <label class="label">
+                                    <span class="label-text-alt opacity-60">Each Plex stream reserves round(total × percent ÷ 100) connections (min 6), capped by max total protected.</span>
+                                </label>
+                            </div>
+                            <div class="form-control">
+                                <label class="label" for="maxTotalProtected">
+                                    <span class="label-text font-medium">Max total protected</span>
+                                </label>
+                                <input type="number" id="maxTotalProtected" class="input input-bordered w-full" min="1" placeholder="40" />
+                            </div>
+                            <div class="form-control">
+                                <label class="label" for="detectBytes">
+                                    <span class="label-text font-medium">Detect bytes</span>
+                                </label>
+                                <input type="text" id="detectBytes" class="input input-bordered w-full" placeholder="4MB" />
+                                <label class="label">
+                                    <span class="label-text-alt opacity-60">Qualifying read volume before reserve can activate.</span>
+                                </label>
+                            </div>
+                            <div class="form-control">
+                                <label class="label" for="detectWindow">
+                                    <span class="label-text font-medium">Detect window</span>
+                                </label>
+                                <input type="text" id="detectWindow" class="input input-bordered w-full" placeholder="5s" />
+                                <label class="label">
+                                    <span class="label-text-alt opacity-60">Sliding window for sustained-read detection.</span>
+                                </label>
+                            </div>
+                            <div class="form-control">
+                                <label class="label" for="idleTimeout">
+                                    <span class="label-text font-medium">Idle timeout</span>
+                                </label>
+                                <input type="text" id="idleTimeout" class="input input-bordered w-full" placeholder="30s" />
+                                <label class="label">
+                                    <span class="label-text-alt opacity-60">Exit reserve mode after no qualifying reads.</span>
+                                </label>
+                            </div>
+                        </div>
+
+                        <div class="form-control">
+                            <label class="label cursor-pointer justify-start gap-3">
+                                <input type="checkbox" id="preCacheOnOpen" class="checkbox checkbox-warning" />
+                                <span class="label-text font-medium">Pre-cache on open (throttled as background while protection is active)</span>
+                            </label>
+                        </div>
+
+                        <p id="playbackProtectionHint" class="text-sm opacity-70"></p>
+                    </div>
                 </div>
 
                 <div class="flex items-center gap-3 pt-2">
@@ -86,19 +158,92 @@
 (function () {
     const urlBase = '{{.URLBase}}';
 
+    function sumProviderConnections(usenet) {
+        const providers = (usenet && usenet.providers) || [];
+        return providers.reduce((total, p) => {
+            const value = parseInt(p.max_connections, 10);
+            return total + (Number.isFinite(value) && value > 0 ? value : 0);
+        }, 0);
+    }
+
+    function computePerStreamBase(total, percent, min) {
+        if (total <= 0) {
+            return min;
+        }
+        const computed = Math.round((total * percent) / 100);
+        return Math.max(min, computed);
+    }
+
+    function computeDynamicReserve(total, streams, percent, min, max) {
+        const perStream = computePerStreamBase(total, percent, min);
+        let reserved = perStream * streams;
+        if (reserved < min) {
+            reserved = min;
+        }
+        if (reserved > max) {
+            reserved = max;
+        }
+        if (reserved >= total && total > 0) {
+            return { reserved: total, background: 0, perStream };
+        }
+        return { reserved, background: Math.max(0, total - reserved), perStream };
+    }
+
+    function updatePlaybackProtectionUI() {
+        const enabled = document.getElementById('playbackProtectionEnabled').checked;
+        document.getElementById('playbackProtectionFields').classList.toggle('hidden', !enabled);
+        updatePlaybackProtectionHint();
+    }
+
+    function updatePlaybackProtectionHint() {
+        const hint = document.getElementById('playbackProtectionHint');
+        if (!hint || !currentConfig) {
+            return;
+        }
+        const usenet = currentConfig.usenet || {};
+        const total = sumProviderConnections(usenet);
+        const percent = parseInt(document.getElementById('reservePercent').value, 10) || 15;
+        const max = parseInt(document.getElementById('maxTotalProtected').value, 10) || 40;
+        if (!total) {
+            hint.textContent = 'Add NNTP providers in Settings to preview protection sizing.';
+            return;
+        }
+        const preview = [1, 2, 3].map((streams) => {
+            const snap = computeDynamicReserve(total, streams, percent, 6, max);
+            return `${streams} Plex stream${streams > 1 ? 's' : ''} → ${snap.reserved} protected / ${snap.background} background`;
+        });
+        const perStream = computePerStreamBase(total, percent, 6);
+        hint.textContent = `With ${total} configured connections (~${perStream} per stream): ${preview.join(' | ')}`;
+    }
+
     async function loadConfig() {
         const res = await fetch(urlBase + 'api/config');
         const cfg = await res.json();
         const dfs = (cfg.mount && cfg.mount.dfs) || {};
+        const usenet = cfg.usenet || {};
         document.getElementById('prewarmEnabled').checked = !!dfs.prewarm_next_episode;
         document.getElementById('plexUrl').value = dfs.plex_url || '';
         document.getElementById('plexToken').value = dfs.plex_token || '';
         document.getElementById('plexMaxSize').value = dfs.prewarm_max_size || '';
+        document.getElementById('playbackProtectionEnabled').checked = !!usenet.interactive_pool_reserve_enabled;
+        document.getElementById('maxTotalProtected').value = usenet.interactive_pool_reserve_max || '';
+        document.getElementById('preCacheOnOpen').checked = !!usenet.pre_cache_on_open;
+        document.getElementById('reservePercent').value = usenet.interactive_pool_reserve_percent || 15;
+        document.getElementById('detectBytes').value = usenet.interactive_detect_bytes || '4MB';
+        document.getElementById('detectWindow').value = usenet.interactive_detect_window || '5s';
+        document.getElementById('idleTimeout').value = usenet.interactive_idle_timeout || '30s';
+        currentConfig = cfg;
+        updatePlaybackProtectionUI();
         return cfg;
     }
 
     let currentConfig = null;
-    loadConfig().then(cfg => { currentConfig = cfg; });
+    loadConfig();
+
+    document.getElementById('playbackProtectionEnabled').addEventListener('change', updatePlaybackProtectionUI);
+    ['maxTotalProtected', 'reservePercent'].forEach((id) => {
+        document.getElementById(id).addEventListener('input', updatePlaybackProtectionHint);
+    });
 
     document.getElementById('plexForm').addEventListener('submit', async function (e) {
         e.preventDefault();
@@ -112,6 +257,17 @@
             cfg.mount.dfs.plex_url = document.getElementById('plexUrl').value.trim();
             cfg.mount.dfs.plex_token = document.getElementById('plexToken').value.trim();
             cfg.mount.dfs.prewarm_max_size = document.getElementById('plexMaxSize').value.trim();
+
+            cfg.usenet = cfg.usenet || {};
+            cfg.usenet.interactive_pool_reserve_enabled = document.getElementById('playbackProtectionEnabled').checked;
+            cfg.usenet.interactive_pool_reserve_per_stream = 0;
+            cfg.usenet.interactive_pool_reserve_max = parseInt(document.getElementById('maxTotalProtected').value, 10) || 40;
+            cfg.usenet.interactive_pool_reserve_percent = parseInt(document.getElementById('reservePercent').value, 10) || 15;
+            cfg.usenet.interactive_pool_reserve_min = cfg.usenet.interactive_pool_reserve_min || 6;
+            cfg.usenet.pre_cache_on_open = document.getElementById('preCacheOnOpen').checked;
+            cfg.usenet.interactive_detect_bytes = document.getElementById('detectBytes').value.trim() || '4MB';
+            cfg.usenet.interactive_detect_window = document.getElementById('detectWindow').value.trim() || '5s';
+            cfg.usenet.interactive_idle_timeout = document.getElementById('idleTimeout').value.trim() || '30s';
 
             const res = await fetch(urlBase + 'api/config', {
                 method: 'POST',
@@ -127,9 +283,7 @@
             try {
                 const result = await res.json();
                 restarted = result.restarted !== false;
-            } catch (_) {
-                // Older backends return no body; assume a restart happened.
-            }
+            } catch (_) {}
 
             currentConfig = cfg;
             if (restarted) {
@@ -137,11 +291,7 @@
                 if (window.decypharrUtils) {
                     window.decypharrUtils.createToast('Configuration saved successfully! Services are restarting...', 'success');
                 }
-                // Reload page after a delay to allow services to restart -
-                // same timing the main Settings page uses (config.js).
-                setTimeout(() => {
-                    window.location.reload();
-                }, 2000);
+                setTimeout(() => window.location.reload(), 2000);
             } else {
                 statusEl.textContent = 'Saved and applied.';
                 if (window.decypharrUtils) {

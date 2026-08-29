@@ -56,6 +56,8 @@ type Client struct {
 	// caps total worker goroutines to exactly pool.Capacity().
 	repairPool *RepairPool
 
+	interactive *interactiveState
+
 	// TCP socket buffer sizes (bytes) applied to every new connection. 0 means
 	// "leave OS autotuning untouched". Sized from cfg.Usenet.Socket*Buffer.
 	// At high RTT the receive buffer is the single-connection throughput cap
@@ -272,6 +274,8 @@ func NewClient(cfg *config.Config, metricStores ...*hybrid.Store) (*Client, erro
 		}
 	}
 	cm.repairPool = cm.newRepairPool(cfg.Repair.NNTPConnectionPercent)
+	cm.interactive = newInteractiveState(cfg)
+	cm.logInteractiveConfig(cfg)
 	var metricStore *hybrid.Store
 	if len(metricStores) > 0 {
 		metricStore = metricStores[0]
@@ -309,6 +313,7 @@ func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 	}
 
 	pp.activeConns.Delete(conn) // Deregister from active tracking
+	c.releaseConnectionBudget(conn)
 
 	// Don't return closed connections to pool
 	if conn.IsClosed() {
@@ -342,6 +347,7 @@ func (c *Client) put(conn *Connection, provider config.UsenetProvider) {
 // release closes a connection without returning it (for error cases)
 func (c *Client) release(conn *Connection) {
 	if conn != nil {
+		c.releaseConnectionBudget(conn)
 		_ = conn.Close()
 		if pp, ok := c.pools[conn.address]; ok {
 			pp.activeConns.Delete(conn) // Deregister from active tracking
@@ -536,18 +542,7 @@ func (c *Client) getConnectionFromProvider(ctx context.Context, provider config.
 	if !ok {
 		return nil, provider, fmt.Errorf("provider pool not found: %s", provider.Host)
 	}
-
-	select {
-	case pp.slots <- struct{}{}:
-		conn, err := c.getOrCreateFromPool(ctx, pp, provider)
-		if err != nil {
-			<-pp.slots
-			return nil, provider, err
-		}
-		return conn, provider, nil
-	case <-ctx.Done():
-		return nil, provider, ctx.Err()
-	}
+	return c.checkoutFromPool(ctx, pp, provider)
 }
 
 // safeExecute wraps fn execution with panic recovery
@@ -579,6 +574,17 @@ func (c *Client) safeExecute(conn *Connection, fn func(conn *Connection) error) 
 // Within a tier, providers are still consumed opportunistically across
 // hosts — so two unlimited primaries split load the way they do today.
 func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions providerExclusions) (*Connection, config.UsenetProvider, error) {
+	if err := c.waitBackgroundBudget(ctx); err != nil {
+		return nil, config.UsenetProvider{}, err
+	}
+	budgetReserved := WorkClassFromContext(ctx) == WorkClassBackground && c.interactiveReserveActive()
+	releaseBudget := func() {
+		if budgetReserved {
+			c.interactive.releaseBackgroundSlot()
+			budgetReserved = false
+		}
+	}
+
 	// Determine whether any primary is eligible first. Avoid building provider
 	// slices on the common path: when a pool has a free slot, the first scan
 	// returns immediately. A slice is only needed for the uncommon all-busy
@@ -601,6 +607,12 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 		eligibleCount++
 		pp := c.pools[provider.Host]
 
+		if WorkClassFromContext(ctx) == WorkClassBackground && c.interactiveReserveActive() {
+			if !c.interactive.backgroundMayUseProvider(len(pp.slots), pp.max, c.TotalConnections()) {
+				continue
+			}
+		}
+
 		select {
 		case pp.slots <- struct{}{}:
 			// Got a slot - try to get or create connection
@@ -609,6 +621,8 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 				<-pp.slots // Release slot on error
 				continue   // Try next provider
 			}
+			c.markConnectionBudget(conn, ctx)
+			budgetReserved = false
 			return conn, provider, nil
 		default:
 			// Pool at capacity, try next provider
@@ -617,7 +631,8 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 	}
 
 	if eligibleCount == 0 {
-		return nil, config.UsenetProvider{}, errors.New("no eligible providers available")
+		releaseBudget()
+		return nil, config.UsenetProvider{}, ErrNoEligibleProviders
 	}
 
 	// Phase 2: All providers in this tier busy - race for first available
@@ -629,7 +644,14 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 			eligible = append(eligible, provider)
 		}
 	}
-	return c.raceForConnection(ctx, eligible)
+	conn, provider, err := c.raceForConnection(ctx, eligible)
+	if err != nil {
+		releaseBudget()
+		return nil, provider, err
+	}
+	c.markConnectionBudget(conn, ctx)
+	budgetReserved = false
+	return conn, provider, nil
 }
 
 // raceForConnection spawns goroutines that race to acquire a connection slot.
@@ -658,6 +680,10 @@ func (c *Client) raceForConnection(ctx context.Context, eligible []config.Usenet
 		go func(p config.UsenetProvider) {
 			defer wg.Done()
 			pp := c.pools[p.Host]
+
+			if err := c.waitProviderHeadroom(innerCtx, pp); err != nil {
+				return
+			}
 
 			// Block waiting for slot (respects context)
 			select {
@@ -723,7 +749,7 @@ func (c *Client) raceForConnection(ctx context.Context, eligible []config.Usenet
 				if lastErr != nil {
 					return nil, config.UsenetProvider{}, lastErr
 				}
-				return nil, config.UsenetProvider{}, errors.New("failed to get connection from any provider")
+				return nil, config.UsenetProvider{}, ErrNoProviderConnection
 			}
 			if r.err == nil && r.conn != nil {
 				if winConn == nil {
@@ -1163,6 +1189,28 @@ func (c *Client) Stats() map[string]interface{} {
 	stats["pool"] = poolStats
 	stats["providers"] = providers
 
+	if c.interactive != nil {
+		snap := c.interactive.snapshot()
+		stats["interactive"] = map[string]interface{}{
+			"enabled":              snap.Enabled,
+			"active":               snap.Active,
+			"active_streams":       snap.ActiveStreams,
+			"per_stream_reserve":   snap.PerStreamReserve,
+			"reserved":             snap.Reserved,
+			"background_budget":    snap.BackgroundBudget,
+			"background_in_use":    snap.BackgroundInUse,
+			"stream_in_use":        snap.StreamInUse,
+			"reserve_percent":      snap.ReservePercent,
+			"reserve_min":          snap.ReserveMin,
+			"reserve_max":          snap.ReserveMax,
+			"reserve_per_stream":   snap.ReservePerStream,
+			"last_entry":           snap.LastEntry,
+			"last_file":            snap.LastFile,
+			"last_client":          snap.LastClient,
+			"started_at":           snap.StartedAt,
+		}
+	}
+
 	return stats
 }
 
@@ -1266,6 +1314,8 @@ func (c *Client) BatchStat(ctx context.Context, messageIDs []string) (*BatchStat
 	if len(messageIDs) == 0 {
 		return &BatchStatResult{}, nil
 	}
+
+	ctx = WithWorkClass(ctx, WorkClassBackground)
 
 	// Early-bailout: cancelled the moment a segment is found definitively
 	// missing (not-found across all providers), so the remaining sample's

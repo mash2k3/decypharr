@@ -1287,6 +1287,9 @@ func (item *CacheItem) ReadAtContext(ctx context.Context, p []byte, off int64) (
 	}
 	n, err := item.buf.ReadAt(p, off)
 	if err == nil || errors.Is(err, io.EOF) {
+		if n > 0 {
+			dls.RecordPlaybackActivity(int64(n), off, readSize, item.info.Size)
+		}
 		// Advance the read position to the end of what we just served. The region
 		// we read was already protected by the SetReadHead(off) above; this moves
 		// the frontier forward so the backstop can reclaim behind us on the next

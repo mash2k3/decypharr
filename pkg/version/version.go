@@ -12,7 +12,7 @@ func (i Info) String() string {
 }
 
 var (
-	Version = "2.4.9"
+	Version = "2.5.0"
 	Channel = "dev"
 	// Build info injected at compile time via ldflags
 )

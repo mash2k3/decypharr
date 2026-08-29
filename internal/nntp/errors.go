@@ -11,6 +11,12 @@ import (
 	"syscall"
 )
 
+// Pool-capacity errors indicate transient NNTP contention, not missing media.
+var (
+	ErrNoEligibleProviders  = errors.New("no eligible providers available")
+	ErrNoProviderConnection = errors.New("failed to get connection from any provider")
+)
+
 // Error types for NNTP operations
 type ErrorType int
 
@@ -234,4 +240,18 @@ func IsRetryableError(err error) bool {
 		return nntpErr.IsRetryable()
 	}
 	return false
+}
+
+// IsPoolCapacityError reports whether err is transient NNTP pool contention
+// (all providers busy, reserve headroom, etc.) rather than missing media.
+func IsPoolCapacityError(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, ErrNoEligibleProviders) || errors.Is(err, ErrNoProviderConnection) {
+		return true
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no eligible providers available") ||
+		strings.Contains(msg, "failed to get connection from any provider")
 }

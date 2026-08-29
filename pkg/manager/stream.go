@@ -200,12 +200,20 @@ func (m *Manager) TrackStream(entry *storage.Entry, filename, client string) str
 		}
 	}
 
+	if streamID != "" {
+		m.NotifyInteractiveStreamCount()
+	}
+
 	return streamID
 }
 
 // UntrackStream removes a previously-registered active stream if the ID is non-empty.
 func (m *Manager) UntrackStream(streamID string) {
+	if streamID == "" {
+		return
+	}
 	m.unregisterStream(streamID)
+	m.NotifyInteractiveStreamCount()
 }
 
 // streamHTTP handles streaming for torrent files via HTTP

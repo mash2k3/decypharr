@@ -137,10 +137,16 @@ func (m *Manager) GetEntries() []FileInfo {
 }
 
 func (m *Manager) GetEntryChildren(group string) (*FileInfo, []FileInfo) {
+	if m == nil || m.entry == nil {
+		return nil, nil
+	}
 	return m.entry.Get(group)
 }
 
 func (m *Manager) GetTorrentChildren(name string) (*FileInfo, []FileInfo) {
+	if m == nil || m.entry == nil {
+		return nil, nil
+	}
 	return m.entry.Get(torrentEntryCachePrefix + name)
 }
 

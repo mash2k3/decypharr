@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"sync"
+	"sync/atomic"
+	"time"
 )
 
 // repairDefaultPercent is used when cfg.Repair.NNTPConnectionPercent is unset.
@@ -30,6 +32,9 @@ type RepairPool struct {
 	wg      sync.WaitGroup
 	quit    chan struct{}
 	once    sync.Once
+
+	interactiveCap atomic.Int32
+	inFlight       atomic.Int32
 }
 
 // repairTask describes one chunk of work the pool will execute. done is
@@ -134,6 +139,61 @@ func (p *RepairPool) Capacity() int {
 	return p.workers
 }
 
+func (p *RepairPool) setInteractiveCap(cap int) {
+	if p == nil {
+		return
+	}
+	if cap <= 0 {
+		p.interactiveCap.Store(0)
+		return
+	}
+	if cap > p.workers {
+		cap = p.workers
+	}
+	p.interactiveCap.Store(int32(cap))
+}
+
+func (p *RepairPool) effectiveCap() int {
+	if p == nil {
+		return 0
+	}
+	cap := p.workers
+	if ic := int(p.interactiveCap.Load()); ic > 0 && ic < cap {
+		return ic
+	}
+	return cap
+}
+
+func (p *RepairPool) acquireProcessing(ctx context.Context) error {
+	if p == nil {
+		return errRepairPoolClosed
+	}
+	cap := p.effectiveCap()
+	for {
+		cur := p.inFlight.Load()
+		if int(cur) >= cap {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-p.quit:
+				return errRepairPoolClosed
+			case <-time.After(50 * time.Millisecond):
+				continue
+			}
+		}
+		if p.inFlight.CompareAndSwap(cur, cur+1) {
+			return nil
+		}
+	}
+}
+
+func (p *RepairPool) releaseProcessing() {
+	if p == nil {
+		return
+	}
+	p.inFlight.Add(-1)
+}
+
 // Submit hands a chunk to the pool. done is invoked on a worker goroutine
 // exactly once when the chunk has been processed (or rejected). Returns
 // an error and does NOT call done when the caller's ctx expires before a
@@ -192,7 +252,12 @@ func (p *RepairPool) worker(c *Client) {
 				t.done(nil, err)
 				continue
 			}
+			if err := p.acquireProcessing(t.ctx); err != nil {
+				t.done(nil, err)
+				continue
+			}
 			results, err := c.batchStatAcrossProviders(t.ctx, t.msgIDs)
+			p.releaseProcessing()
 			t.done(results, err)
 		}
 	}

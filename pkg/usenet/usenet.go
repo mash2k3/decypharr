@@ -223,6 +223,8 @@ type Usenet struct {
 	prefetchSize             int64       // Streaming prefetch size in bytes
 	failedFiles              *xsync.Map[string, error]
 
+	onStreamBytes func(nzoID, filename string, n int64, probe bool)
+
 	fs *xsync.Map[string, *fsEntry]
 }
 
@@ -443,7 +445,7 @@ func (u *Usenet) ParseWithID(ctx context.Context, id, name string, content []byt
 	}
 
 	// Create parser with the manager
-	prs := parser.NewParser(u.nntp, u.processingMaxConnections, u.logger.With().Str("component", "parser").Logger())
+	prs := parser.NewParser(u.nntp, u.EffectiveProcessingMaxConnections(), u.logger.With().Str("component", "parser").Logger())
 
 	// Quick parse: defer archive extraction for async processing
 	nzb, groups, err := prs.Parse(ctx, name, content)
@@ -493,7 +495,7 @@ func (u *Usenet) Process(ctx context.Context, nzb *storage.NZB, groups map[strin
 		Msg("Processing archive files in NZB")
 
 	// Create parser with the manager
-	prs := parser.NewParser(u.nntp, u.processingMaxConnections, u.logger.With().Str("component", "parser").Logger())
+	prs := parser.NewParser(u.nntp, u.EffectiveProcessingMaxConnections(), u.logger.With().Str("component", "parser").Logger())
 	// Process the groups (archives)
 	updatedNZB, err := prs.Process(ctx, nzb, groups)
 	if err != nil {
@@ -827,6 +829,7 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 
 // Stream streams a file using the new streaming system with caching and worker limiting
 func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer) error {
+	ctx = nntp.WithWorkClass(ctx, nntp.WorkClassStream)
 	if start < 0 {
 		start = 0
 	}
@@ -887,7 +890,12 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	defer releaseStreamBuffer(buf)
 
 	// Use a safe copy loop that checks context and validates read counts
-	_, err = safeCopyBuffer(ctx, writer, section, buf)
+	written, err := safeCopyBuffer(ctx, writer, section, buf)
+	if written > 0 && u.onStreamBytes != nil {
+		fileSize := ufsEntry.volumes[0].Size
+		probe := isInteractiveProbeRead(rangeStart, length, fileSize)
+		u.onStreamBytes(nzoID, filename, written, probe)
+	}
 
 	// Handle context cancellation explicitly
 	if err != nil && ctx.Err() != nil {
@@ -1023,12 +1031,13 @@ func (u *Usenet) PreCache(ctx context.Context, nzoID, filename string) error {
 	}
 
 	// Pre-fetch head segments using Prefetch (non-blocking segment download)
-	readerAt.Prefetch(ctx, 0, headSize)
+	bgCtx := nntp.WithWorkClass(ctx, nntp.WorkClassBackground)
+	readerAt.Prefetch(bgCtx, 0, headSize)
 
 	// Pre-fetch tail segments (if file is large enough)
 	if fileSize > headSize+tailSize {
 		tailOffset := fileSize - tailSize
-		readerAt.Prefetch(ctx, tailOffset, tailSize)
+		readerAt.Prefetch(bgCtx, tailOffset, tailSize)
 	}
 
 	return nil
@@ -1288,3 +1297,57 @@ func fileExists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
 }
+
+const interactiveProbeTailZone = 64 << 20
+
+func isInteractiveProbeRead(off, length, fileSize int64) bool {
+	if fileSize <= 0 || length <= 0 {
+		return false
+	}
+	return off+length >= fileSize-interactiveProbeTailZone
+}
+
+// SetStreamBytesRecorder registers a callback for bytes streamed to clients.
+func (u *Usenet) SetStreamBytesRecorder(fn func(nzoID, filename string, n int64, probe bool)) {
+	if u == nil {
+		return
+	}
+	u.onStreamBytes = fn
+}
+
+// ConfigureInteractiveReserve reloads NNTP reserve settings.
+func (u *Usenet) ConfigureInteractiveReserve(cfg *config.Config) {
+	if u == nil || u.nntp == nil || cfg == nil {
+		return
+	}
+	u.nntp.ConfigureInteractiveReserve(cfg)
+}
+
+// SetInteractiveReserveActive toggles interactive NNTP pool reserve mode.
+func (u *Usenet) SetInteractiveReserveActive(active bool, entry, file, client string, activeStreams int, bytesInWindow int64, detectWindow time.Duration) {
+	if u == nil || u.nntp == nil {
+		return
+	}
+	u.nntp.SetInteractiveReserveActive(active, nntp.ReserveMeta{
+		Entry:  entry,
+		File:   file,
+		Client: client,
+	}, activeStreams, bytesInWindow, detectWindow)
+}
+
+// SetInteractiveStreamCount updates reserve sizing for the current active stream count.
+func (u *Usenet) SetInteractiveStreamCount(activeStreams int) {
+	if u == nil || u.nntp == nil {
+		return
+	}
+	u.nntp.SetInteractiveStreamCount(activeStreams)
+}
+
+// EffectiveProcessingMaxConnections returns processing concurrency capped during reserve.
+func (u *Usenet) EffectiveProcessingMaxConnections() int {
+	if u == nil || u.nntp == nil {
+		return u.processingMaxConnections
+	}
+	return u.nntp.EffectiveProcessingMaxConnections(u.processingMaxConnections)
+}
+

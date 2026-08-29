@@ -624,6 +624,7 @@ func (s *Server) handleUpdateConfig(w http.ResponseWriter, r *http.Request) {
 				s.logger.Warn().Err(err).Msg("Failed to apply repair config after live update")
 			}
 		}
+		s.manager.ReconfigureInteractiveMonitor(config.Get())
 	}
 
 	utils.JSONResponse(w, map[string]any{"status": "success", "restarted": restarted}, http.StatusOK)

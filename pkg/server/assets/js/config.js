@@ -49,6 +49,24 @@ class ConfigManager {
         this.refs.addVirtualFolderBtn.addEventListener('click', () => this.addVirtualFolder());
         this.refs.addUsenetProviderBtn.addEventListener('click', () => this.addUsenetProvider());
 
+        const interactiveToggle = document.getElementById('usenet.interactive_pool_reserve_enabled');
+        if (interactiveToggle) {
+            interactiveToggle.addEventListener('change', () => this.updateInteractivePoolReserveUI());
+        }
+        ['interactive_pool_reserve_per_stream', 'interactive_pool_reserve_percent', 'interactive_pool_reserve_max'].forEach((field) => {
+            const input = document.querySelector(`[name="usenet.${field}"]`);
+            if (input) {
+                input.addEventListener('input', () => this.updateInteractivePoolReserveHint());
+            }
+        });
+        if (this.refs.usenetProviders) {
+            this.refs.usenetProviders.addEventListener('input', (e) => {
+                if (e.target && e.target.name && e.target.name.includes('max_connections')) {
+                    this.updateInteractivePoolReserveHint();
+                }
+            });
+        }
+
         const addRuleBtn = document.getElementById('addQueueCleanupRuleBtn');
         if (addRuleBtn) addRuleBtn.addEventListener('click', () => this.addQueueCleanupCustomRow());
     }
@@ -89,6 +107,8 @@ class ConfigManager {
             }
 
             const config = await response.json();
+            this.loadedUsenet = config.usenet || {};
+            this.loadedMount = config.mount || {};
             this.populateForm(config);
 
         } catch (error) {
@@ -1289,6 +1309,14 @@ class ConfigManager {
             }
         });
 
+        const savedUsenet = this.loadedUsenet || {};
+        const reserveEnabledEl = document.querySelector('[name="usenet.interactive_pool_reserve_enabled"]');
+        const perStreamEl = document.querySelector('[name="usenet.interactive_pool_reserve_per_stream"]');
+        const percentEl = document.querySelector('[name="usenet.interactive_pool_reserve_percent"]');
+        const minEl = document.querySelector('[name="usenet.interactive_pool_reserve_min"]');
+        const maxEl = document.querySelector('[name="usenet.interactive_pool_reserve_max"]');
+        const preCacheEl = document.querySelector('[name="usenet.pre_cache_on_open"]');
+
         return {
             providers: providers,
             max_connections: parseInt(document.querySelector('[name="usenet.max_connections"]')?.value) || 15,
@@ -1296,6 +1324,15 @@ class ConfigManager {
                 || parseInt(document.querySelector('[name="usenet.max_connections"]')?.value)
                 || 15,
             read_ahead: document.querySelector('[name="usenet.read_ahead"]').value || "16MB",
+            pre_cache_on_open: preCacheEl ? preCacheEl.checked : (savedUsenet.pre_cache_on_open ?? false),
+            interactive_pool_reserve_enabled: reserveEnabledEl ? reserveEnabledEl.checked : (savedUsenet.interactive_pool_reserve_enabled ?? false),
+            interactive_pool_reserve_per_stream: perStreamEl ? (parseInt(perStreamEl.value, 10) || 0) : (savedUsenet.interactive_pool_reserve_per_stream ?? 0),
+            interactive_pool_reserve_percent: percentEl ? (parseInt(percentEl.value, 10) || 15) : (savedUsenet.interactive_pool_reserve_percent ?? 15),
+            interactive_pool_reserve_min: minEl ? (parseInt(minEl.value, 10) || 6) : (savedUsenet.interactive_pool_reserve_min ?? 6),
+            interactive_pool_reserve_max: maxEl ? (parseInt(maxEl.value, 10) || 40) : (savedUsenet.interactive_pool_reserve_max ?? 40),
+            interactive_detect_bytes: document.querySelector('[name="usenet.interactive_detect_bytes"]')?.value || savedUsenet.interactive_detect_bytes || "4MB",
+            interactive_detect_window: document.querySelector('[name="usenet.interactive_detect_window"]')?.value || savedUsenet.interactive_detect_window || "5s",
+            interactive_idle_timeout: document.querySelector('[name="usenet.interactive_idle_timeout"]')?.value || savedUsenet.interactive_idle_timeout || "30s",
             processing_timeout: document.querySelector('[name="usenet.processing_timeout"]')?.value || "5m",
             conn_idle_timeout: document.querySelector('[name="usenet.conn_idle_timeout"]')?.value || "",
             availability_sample_percent: parseInt(document.querySelector('[name="usenet.availability_sample_percent"]')?.value) || 10,
@@ -1561,7 +1598,8 @@ class ConfigManager {
             }
         };
 
-        return {
+        const savedDfs = (this.loadedMount && this.loadedMount.dfs) || {};
+        const dfs = {
             cache_dir: getElementValue('cache_dir'),
             disk_cache_size: getElementValue('disk_cache_size'),
             buffer_memory: getElementValue('buffer_memory'),
@@ -1574,6 +1612,25 @@ class ConfigManager {
             gid: getElementValue('gid', 0),
             umask: getElementValue('umask'),
         };
+
+        // Plex-page-only fields: Settings has no inputs for these, so carry
+        // forward the last loaded values instead of wiping them on save.
+        if (savedDfs.prewarm_next_episode) {
+            dfs.prewarm_next_episode = true;
+        } else if (savedDfs.prewarm_next_episode === false) {
+            dfs.prewarm_next_episode = false;
+        }
+        if (savedDfs.prewarm_max_size) {
+            dfs.prewarm_max_size = savedDfs.prewarm_max_size;
+        }
+        if (savedDfs.plex_url) {
+            dfs.plex_url = savedDfs.plex_url;
+        }
+        if (savedDfs.plex_token) {
+            dfs.plex_token = savedDfs.plex_token;
+        }
+
+        return dfs;
     }
 
     setupMagnetHandler() {
@@ -1832,6 +1889,15 @@ class ConfigManager {
             'max_connections': usenet.max_connections,
             'processing_max_connections': usenet.processing_max_connections,
             'read_ahead': usenet.read_ahead,
+            'pre_cache_on_open': usenet.pre_cache_on_open,
+            'interactive_pool_reserve_enabled': usenet.interactive_pool_reserve_enabled,
+            'interactive_pool_reserve_per_stream': usenet.interactive_pool_reserve_per_stream,
+            'interactive_pool_reserve_percent': usenet.interactive_pool_reserve_percent,
+            'interactive_pool_reserve_min': usenet.interactive_pool_reserve_min,
+            'interactive_pool_reserve_max': usenet.interactive_pool_reserve_max,
+            'interactive_detect_bytes': usenet.interactive_detect_bytes,
+            'interactive_detect_window': usenet.interactive_detect_window,
+            'interactive_idle_timeout': usenet.interactive_idle_timeout,
             'processing_timeout': usenet.processing_timeout,
             'conn_idle_timeout': usenet.conn_idle_timeout,
             'availability_sample_percent': usenet.availability_sample_percent,
@@ -1844,9 +1910,90 @@ class ConfigManager {
         Object.entries(streamFields).forEach(([id, value]) => {
             const input = document.getElementsByName(`usenet.${id}`)[0];
             if (input && value !== undefined) {
-                input.value = value;
+                if (input.type === 'checkbox') {
+                    input.checked = Boolean(value);
+                } else {
+                    input.value = value;
+                }
             }
         });
+        this.updateInteractivePoolReserveUI();
+    }
+
+    computePerStreamReserveBase(totalConnections, percent, minReserve, perStreamOverride) {
+        if (perStreamOverride > 0) {
+            return perStreamOverride;
+        }
+        if (!totalConnections || totalConnections <= 0) {
+            return 0;
+        }
+        const pct = percent > 0 ? percent : 15;
+        const min = minReserve > 0 ? minReserve : 6;
+        let reserve = Math.ceil((totalConnections * pct) / 100);
+        if (reserve < min) reserve = min;
+        if (reserve >= totalConnections) return totalConnections;
+        return reserve;
+    }
+
+    computeDynamicInteractiveReserve(totalConnections, activeStreams, percent, minReserve, maxTotal, perStreamOverride) {
+        if (!totalConnections || totalConnections <= 0 || !activeStreams || activeStreams <= 0) {
+            return {reserved: 0, perStream: 0, background: totalConnections || 0};
+        }
+        const max = maxTotal > 0 ? maxTotal : 40;
+        const perStream = this.computePerStreamReserveBase(totalConnections, percent, minReserve, perStreamOverride);
+        let reserved = perStream * activeStreams;
+        const min = minReserve > 0 ? minReserve : 6;
+        if (reserved < min) reserved = min;
+        if (reserved > max) reserved = max;
+        if (reserved >= totalConnections) reserved = totalConnections;
+        return {reserved, perStream, background: totalConnections - reserved};
+    }
+
+    computeInteractiveReserve(totalConnections, percent, minReserve, maxReserve) {
+        return this.computeDynamicInteractiveReserve(totalConnections, 1, percent, minReserve, maxReserve, 0).reserved;
+    }
+
+    sumUsenetProviderConnections() {
+        let total = 0;
+        this.refs.usenetProviders.querySelectorAll('[name$=".max_connections"]').forEach((input) => {
+            const value = parseInt(input.value, 10);
+            if (!Number.isNaN(value) && value > 0) {
+                total += value;
+            }
+        });
+        return total;
+    }
+
+    updateInteractivePoolReserveUI() {
+        const toggle = document.getElementById('usenet.interactive_pool_reserve_enabled');
+        const advanced = document.getElementById('interactivePoolReserveAdvanced');
+        if (!toggle || !advanced) {
+            return;
+        }
+        advanced.classList.toggle('hidden', !toggle.checked);
+        this.updateInteractivePoolReserveHint();
+    }
+
+    updateInteractivePoolReserveHint() {
+        const hint = document.getElementById('interactivePoolReserveHint');
+        if (!hint) {
+            return;
+        }
+        const total = this.sumUsenetProviderConnections();
+        const percent = parseInt(document.querySelector('[name="usenet.interactive_pool_reserve_percent"]')?.value, 10) || 15;
+        const min = parseInt(document.querySelector('[name="usenet.interactive_pool_reserve_min"]')?.value, 10) || 6;
+        const max = parseInt(document.querySelector('[name="usenet.interactive_pool_reserve_max"]')?.value, 10) || 40;
+        const perStreamOverride = parseInt(document.querySelector('[name="usenet.interactive_pool_reserve_per_stream"]')?.value, 10) || 0;
+        if (!total) {
+            hint.textContent = 'Add NNTP servers below to preview per-stream protection during playback.';
+            return;
+        }
+        const preview = [1, 2, 3].map((streams) => {
+            const snap = this.computeDynamicInteractiveReserve(total, streams, percent, min, max, perStreamOverride);
+            return `${streams} stream${streams > 1 ? 's' : ''} → ${snap.reserved} protected / ${snap.background} background`;
+        });
+        const perStream = this.computePerStreamReserveBase(total, percent, min, perStreamOverride);
+        hint.textContent = `With ${total} configured connections (~${perStream} per stream): ${preview.join(' | ')}`;
     }
 
     addUsenetProvider(data = {}) {
@@ -1859,6 +2006,7 @@ class ConfigManager {
         }
 
         this.usenetProviderCount++;
+        this.updateInteractivePoolReserveHint();
     }
 
     populateUsenetProviderData(index, data) {

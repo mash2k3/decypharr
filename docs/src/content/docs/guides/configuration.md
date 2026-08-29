@@ -116,6 +116,14 @@ Array of Debrid services:
     "max_connections": 15,
     "processing_max_connections": 15,
     "read_ahead": "16MB",
+    "pre_cache_on_open": false,
+    "interactive_pool_reserve_enabled": false,
+    "interactive_pool_reserve_percent": 15,
+    "interactive_pool_reserve_min": 6,
+    "interactive_pool_reserve_max": 40,
+    "interactive_detect_bytes": "4MB",
+    "interactive_detect_window": "5s",
+    "interactive_idle_timeout": "30s",
     "processing_timeout": "10m",
     "availability_sample_percent": 10,
     "import_availability_sample_percent": 1,
@@ -132,6 +140,14 @@ Array of Debrid services:
 | `max_connections`             | int    | Max connections per streaming file | `15`                      |
 | `processing_max_connections`  | int    | Max connections per file for parsing and NZB downloads | Same as `max_connections` |
 | `read_ahead`                  | string | Prefetch buffer size            | `16MB`                       |
+| `pre_cache_on_open`           | bool   | Fetch the head and tail when a Usenet file is opened; throttled as background work while playback protection is active | `false` |
+| `interactive_pool_reserve_enabled` | bool | Plex-gated playback protection (configured on the Plex page). When enabled with Plex URL/token, reserves NNTP capacity per confirmed Plex session **only while bulk imports are also running**. Playback alone uses the full pool. | `false` |
+| `interactive_pool_reserve_percent` | int | Per-stream reserve as percent of total pool (configured on the Plex page) | `15` |
+| `interactive_pool_reserve_min` | int | Minimum total reserve floor (small pools) | `6` |
+| `interactive_pool_reserve_max` | int | Maximum total protected connections across all Plex streams | `40` |
+| `interactive_detect_bytes` | string | Qualifying bytes in the detect window before reserve can activate (requires Plex playback + background imports) | `4MB` |
+| `interactive_detect_window` | string | Sliding window for sustained-read detection | `5s` |
+| `interactive_idle_timeout` | string | Exit reserve mode after no qualifying reads | `30s` |
 | `processing_timeout`          | string | Max time for NZB processing     | `10m`                        |
 | `availability_sample_percent` | int    | % of segments to check during repairs (1-100) | `10`             |
 | `import_availability_sample_percent` | int | % of segments to check when adding an NZB (1-100) | `1`         |
@@ -207,6 +223,12 @@ Mount configuration determines how files are exposed on the filesystem.
 | `umask`                  | Permission mask              | `022`           |
 | `allow_other`            | Allow other users to access  | `false`         |
 | `default_permissions`    | Enable permission checks     | `false`         |
+| `plex_url`               | Plex server URL (Settings → Plex page). Shared by next-episode prewarm and playback protection. Must be reachable from decypharr, not necessarily from your browser. | `""` |
+| `plex_token`             | Plex auth token (X-Plex-Token) | `""` |
+| `prewarm_next_episode`   | Prefetch the next episode when Plex reports active TV playback | `false` |
+| `prewarm_lead_seconds`   | How far before episode end to start prewarming | `300` |
+
+Playback protection (`interactive_pool_reserve_*` fields) is configured on the **Plex** page in the web UI, not Settings. Stream counting uses Plex `/status/sessions` so Bazarr and other mount readers are not counted. Reserve mode activates only when confirmed Plex playback overlaps with queued or active bulk imports; when nothing is importing, Plex streams use the full NNTP pool.
 
 ### Rclone Configuration
 
@@ -386,6 +408,7 @@ DEBRIDS__0__API_KEY=your_key
 
 # Usenet
 USENET__MAX_CONNECTIONS=20
+USENET__PRE_CACHE_ON_OPEN=false
 USENET__PROVIDERS__0__HOST=news.provider.com
 USENET__PROVIDERS__0__PORT=563
 USENET__PROVIDERS__0__BACKBONE=Omicron

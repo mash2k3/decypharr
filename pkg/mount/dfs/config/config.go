@@ -39,11 +39,12 @@ type FuseConfig struct {
 
 	Retries int
 
-	// PrewarmNextEpisode/PlexURL/PlexToken/PrewarmMaxBytes — see internal/config.DFS.
-	PrewarmNextEpisode bool
-	PlexURL            string
-	PlexToken          string
-	PrewarmMaxBytes    int64
+	// Playback and Usenet warmup controls propagated from the main config.
+	PrewarmNextEpisode   bool
+	PlexURL              string
+	PlexToken            string
+	PrewarmMaxBytes      int64
+	UsenetPreCacheOnOpen bool
 
 	// File system settings
 	UID   uint32
@@ -135,6 +136,7 @@ func ParseFuseConfig() *FuseConfig {
 	fuseConfig.PlexURL = cfg.PlexURL
 	fuseConfig.PlexToken = cfg.PlexToken
 	fuseConfig.PrewarmMaxBytes = cfg.PrewarmMaxSizeBytes()
+	fuseConfig.UsenetPreCacheOnOpen = mainCfg.Usenet.PreCacheOnOpen
 
 	fuseConfig.UID = cfg.UID
 	fuseConfig.GID = cfg.GID

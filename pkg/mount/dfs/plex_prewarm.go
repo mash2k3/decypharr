@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/manager"
@@ -66,11 +67,29 @@ type plexSession struct {
 	ParentRatingKey      string `json:"parentRatingKey"`      // season's ratingKey - used to list the season's episodes
 	GrandparentRatingKey string `json:"grandparentRatingKey"` // show's ratingKey - used to list its seasons, for crossing a season boundary
 	Type                 string `json:"type"`                 // "episode", "movie", etc.
+	Title                string `json:"title"`
+	Year                 int    `json:"year"`
 	GrandparentTitle     string `json:"grandparentTitle"`
 	ParentIndex          int    `json:"parentIndex"` // season number
 	Index                int    `json:"index"`       // episode number
 	ViewOffset           int64  `json:"viewOffset"`  // ms
 	Duration             int64  `json:"duration"`    // ms
+	Media                []struct {
+		Part []struct {
+			File string `json:"file"`
+		} `json:"Part"`
+	} `json:"Media"`
+}
+
+func (s plexSession) sessionBasename() string {
+	for _, media := range s.Media {
+		for _, part := range media.Part {
+			if part.File != "" {
+				return path.Base(part.File)
+			}
+		}
+	}
+	return ""
 }
 
 // plexChildrenResponse is the shape of /library/metadata/{ratingKey}/children.
@@ -231,14 +250,19 @@ func findFileByBasename(mgr *manager.Manager, basename string) *manager.FileInfo
 	return nil
 }
 
-// startPlexPrewarmPoller runs until ctx is cancelled. No-op unless both
-// PrewarmNextEpisode is enabled and PlexURL/PlexToken are configured.
-func (m *Manager) startPlexPrewarmPoller(ctx context.Context) {
-	if !m.config.PrewarmNextEpisode {
+// startPlexSessionPoller runs until ctx is cancelled when Plex credentials are
+// configured and either prewarm or playback protection is enabled.
+func (m *Manager) startPlexSessionPoller(ctx context.Context) {
+	if m.config.PlexURL == "" || m.config.PlexToken == "" {
+		if m.config.PrewarmNextEpisode {
+			m.logger.Warn().Msg("Prewarm: prewarm_next_episode is enabled but plex_url/plex_token are not set - nothing will happen")
+		}
+		if m.manager != nil && m.manager.InteractivePoolReserveEnabled() {
+			m.logger.Warn().Msg("Playback protection: enabled but plex_url/plex_token are not set - protection inactive")
+		}
 		return
 	}
-	if m.config.PlexURL == "" || m.config.PlexToken == "" {
-		m.logger.Warn().Msg("Prewarm: prewarm_next_episode is enabled but plex_url/plex_token are not set - nothing will happen")
+	if !m.plexSessionPollNeeded() {
 		return
 	}
 
@@ -249,6 +273,7 @@ func (m *Manager) startPlexPrewarmPoller(ctx context.Context) {
 	go func() {
 		ticker := time.NewTicker(plexPollInterval)
 		defer ticker.Stop()
+		pollPlexSessionsOnce(ctx, client, m.config.PlexURL, m.config.PlexToken, m.manager, m.vfs, seen, log, m.config.PrewarmMaxBytes)
 		for {
 			select {
 			case <-ctx.Done():
@@ -259,15 +284,59 @@ func (m *Manager) startPlexPrewarmPoller(ctx context.Context) {
 		}
 	}()
 	log.Info().Str("plex_url", m.config.PlexURL).Dur("interval", plexPollInterval).
-		Int64("max_bytes", m.config.PrewarmMaxBytes).Msg("Prewarm: started Plex session poller")
+		Int64("max_bytes", m.config.PrewarmMaxBytes).
+		Msg("Plex: started session poller")
+}
+
+func (m *Manager) plexSessionPollNeeded() bool {
+	if m.config.PrewarmNextEpisode {
+		return true
+	}
+	return m.manager != nil && m.manager.InteractivePoolReserveEnabled()
+}
+
+// startPlexPrewarmPoller is kept for call-site compatibility.
+func (m *Manager) startPlexPrewarmPoller(ctx context.Context) {
+	m.startPlexSessionPoller(ctx)
 }
 
 func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, plexToken string, mgr *manager.Manager, vfsMgr *vfs.Manager, seen *prewarmedSessions, log zerolog.Logger, maxBytes int64) {
+	prewarmEnabled := false
+	protectionEnabled := false
+	if cfg := config.Get(); cfg != nil {
+		prewarmEnabled = cfg.Mount.DFS.PrewarmNextEpisode
+	}
+	if mgr != nil {
+		protectionEnabled = mgr.InteractivePoolReserveEnabled()
+	}
+
 	sessions, err := fetchPlexSessions(ctx, client, plexURL, plexToken)
 	if err != nil {
-		log.Warn().Err(err).Msg("Prewarm: failed to fetch Plex sessions")
+		log.Warn().Err(err).Msg("Plex: failed to fetch sessions")
+		if protectionEnabled && mgr != nil {
+			mgr.ClearPlexProtectedStreams(err)
+		}
 		return
 	}
+
+	if protectionEnabled && mgr != nil {
+		before := mgr.PlexProtectedStreamCount()
+		protected := resolveProtectedStreams(mgr, sessions)
+		mgr.SetPlexProtectedStreams(protected)
+		switch {
+		case len(protected) > 0 && len(protected) != before:
+			log.Info().Int("sessions", len(sessions)).Int("protected", len(protected)).Msg("Plex: protected streams updated")
+		case len(sessions) > 0 && len(protected) == 0:
+			if shouldLogPlexUnmatched(time.Now()) {
+				log.Info().Int("sessions", len(sessions)).Msg("Plex: active sessions but no mount file match yet")
+			}
+		}
+	}
+
+	if !prewarmEnabled {
+		return
+	}
+
 	seen.evictExpired()
 
 	for _, s := range sessions {
@@ -359,6 +428,40 @@ func fetchPlexSessions(ctx context.Context, client *http.Client, plexURL, plexTo
 type prewarmedSessions struct {
 	mu      sync.Mutex
 	entries map[string]time.Time
+}
+
+var (
+	lastPlexUnmatchedLog time.Time
+	lastPlexUnmatchedMu  sync.Mutex
+)
+
+func shouldLogPlexUnmatched(now time.Time) bool {
+	lastPlexUnmatchedMu.Lock()
+	defer lastPlexUnmatchedMu.Unlock()
+	if !now.After(lastPlexUnmatchedLog.Add(time.Minute)) {
+		return false
+	}
+	lastPlexUnmatchedLog = now
+	return true
+}
+
+// mountBasenameCandidates returns Plex-reported basenames to try against the
+// mount. The original basename is always tried first (direct mount / release
+// filename libraries). cli_debrid symlinks add a second candidate extracted
+// from trailing parentheses, e.g. "Shrek 2 (2004) - tt... - (Release.mkv)".
+func mountBasenameCandidates(plexBasename string) []string {
+	if plexBasename == "" {
+		return nil
+	}
+	candidates := []string{plexBasename}
+	if i := strings.LastIndex(plexBasename, "("); i >= 0 {
+		inner := strings.TrimSpace(plexBasename[i+1:])
+		inner = strings.TrimSuffix(inner, ")")
+		if inner != "" && strings.Contains(inner, ".") {
+			candidates = append(candidates, inner)
+		}
+	}
+	return candidates
 }
 
 func (p *prewarmedSessions) markIfNew(key string) bool {
@@ -556,4 +659,143 @@ func normalizeEpisodeTitle(s string) string {
 		}
 	}
 	return b.String()
+}
+
+func resolveProtectedStreams(mgr *manager.Manager, sessions []plexSession) []manager.PlexProtectedStream {
+	if mgr == nil {
+		return nil
+	}
+	now := time.Now().Unix()
+	seen := make(map[string]struct{})
+	out := make([]manager.PlexProtectedStream, 0, len(sessions))
+	for _, s := range sessions {
+		if s.Duration <= 0 {
+			continue
+		}
+		switch s.Type {
+		case "episode":
+			if s.ParentIndex <= 0 || s.Index <= 0 || s.GrandparentTitle == "" {
+				continue
+			}
+		case "movie":
+			if s.Title == "" {
+				continue
+			}
+		default:
+			continue
+		}
+		file := resolveCurrentPlayingFile(mgr, s)
+		if file == nil {
+			continue
+		}
+		id := file.Parent() + ":" + file.Name()
+		if _, dup := seen[id]; dup {
+			continue
+		}
+		seen[id] = struct{}{}
+		out = append(out, manager.PlexProtectedStream{
+			ID:        id,
+			EntryName: file.Parent(),
+			FileName:  file.Name(),
+			RatingKey: s.RatingKey,
+			Type:      s.Type,
+			UpdatedAt: now,
+		})
+	}
+	return out
+}
+
+func resolveCurrentPlayingFile(mgr *manager.Manager, s plexSession) *manager.FileInfo {
+	// Matching tries several strategies in order; all paths remain active:
+	//  1. Exact basename — Plex points at mount/release filename (no symlinks)
+	//  2. Symlink release name — cli_debrid "(Release.mkv)" in trailing parens
+	//  3. Parse Plex basename — title/year or SxxExx from symlink-style names
+	//  4. Plex metadata — findMovie(title,year) / findEpisode(show,S,E) fallback
+	for _, basename := range mountBasenameCandidates(s.sessionBasename()) {
+		if file := findFileByBasename(mgr, basename); file != nil {
+			return file
+		}
+	}
+	if basename := s.sessionBasename(); basename != "" {
+		// Plex often reports cli_debrid symlink names, not the release filename
+		// tracked in cli_mount. Parse SxxExx/title out of the symlink basename.
+		parsed := utils.ParseTorrentName(basename)
+		if parsed.IsTV && parsed.Season > 0 && parsed.EpStart > 0 {
+			title := parsed.Title
+			if title == "" {
+				title = s.GrandparentTitle
+			}
+			if file := findEpisode(mgr, title, parsed.Season, parsed.EpStart); file != nil {
+				return file
+			}
+		}
+		if !parsed.IsTV {
+			title := parsed.Title
+			if title == "" {
+				title = s.Title
+			}
+			year := 0
+			if parsed.Year != "" {
+				fmt.Sscanf(parsed.Year, "%d", &year)
+			}
+			if year == 0 {
+				year = s.Year
+			}
+			if file := findMovie(mgr, title, year); file != nil {
+				return file
+			}
+		}
+	}
+	switch s.Type {
+	case "episode":
+		return findEpisode(mgr, s.GrandparentTitle, s.ParentIndex, s.Index)
+	case "movie":
+		return findMovie(mgr, s.Title, s.Year)
+	default:
+		return nil
+	}
+}
+
+func findMovie(mgr *manager.Manager, title string, year int) *manager.FileInfo {
+	if title == "" {
+		return nil
+	}
+	wantTitle := normalizeEpisodeTitle(title)
+	yearStr := ""
+	if year > 0 {
+		yearStr = fmt.Sprintf("%d", year)
+	}
+	_, torrents := mgr.GetEntryChildren(manager.EntryAllFolder)
+	for _, entry := range torrents {
+		if !entry.IsDir() {
+			continue
+		}
+		entryParsed := utils.ParseTorrentName(entry.Name())
+		if yearStr != "" && entryParsed.Year != "" && entryParsed.Year != yearStr {
+			continue
+		}
+		_, children := mgr.GetTorrentChildren(entry.Name())
+		for i := range children {
+			child := &children[i]
+			if child.IsDir() || child.Size() < minPlausibleEpisodeSize {
+				continue
+			}
+			cp := utils.ParseTorrentName(child.Name())
+			if cp.IsTV {
+				continue
+			}
+			candidate := cp.Title
+			if candidate == "" {
+				candidate = entryParsed.Title
+			}
+			if wantTitle != "" && normalizeEpisodeTitle(candidate) != wantTitle {
+				continue
+			}
+			if yearStr != "" && cp.Year != "" && cp.Year != yearStr && entryParsed.Year != yearStr {
+				continue
+			}
+			return child
+		}
+	}
+	return nil
 }
