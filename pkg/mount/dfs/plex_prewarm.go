@@ -5,7 +5,10 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"path"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"sync"
 	"time"
@@ -82,10 +85,18 @@ type plexSession struct {
 }
 
 func (s plexSession) sessionBasename() string {
+	if p := s.sessionPath(); p != "" {
+		return path.Base(p)
+	}
+	return ""
+}
+
+// sessionPath is the full file path Plex reports for the playing item.
+func (s plexSession) sessionPath() string {
 	for _, media := range s.Media {
 		for _, part := range media.Part {
 			if part.File != "" {
-				return path.Base(part.File)
+				return part.File
 			}
 		}
 	}
@@ -113,6 +124,14 @@ type plexChildrenResponse struct {
 // not from parsing a release filename. Returns "" if Plex doesn't have a
 // next episode in this season (e.g. a season finale) or the lookup fails.
 func fetchNextEpisodeFilename(ctx context.Context, client *http.Client, plexURL, plexToken, seasonRatingKey string, wantIndex int) string {
+	if p := fetchNextEpisodePath(ctx, client, plexURL, plexToken, seasonRatingKey, wantIndex); p != "" {
+		return path.Base(p)
+	}
+	return ""
+}
+
+// fetchNextEpisodePath is fetchNextEpisodeFilename returning Plex's full path.
+func fetchNextEpisodePath(ctx context.Context, client *http.Client, plexURL, plexToken, seasonRatingKey string, wantIndex int) string {
 	if seasonRatingKey == "" {
 		return ""
 	}
@@ -141,7 +160,7 @@ func fetchNextEpisodeFilename(ctx context.Context, client *http.Client, plexURL,
 			continue
 		}
 		if len(ep.Media) > 0 && len(ep.Media[0].Part) > 0 && ep.Media[0].Part[0].File != "" {
-			return path.Base(ep.Media[0].Part[0].File)
+			return ep.Media[0].Part[0].File
 		}
 	}
 	return ""
@@ -161,6 +180,7 @@ type plexSeasonsResponse struct {
 
 type plexEpisodeTarget struct {
 	Filename string
+	Path     string // full path as Plex reports it
 	Season   int
 	Episode  int
 }
@@ -207,18 +227,85 @@ func fetchSeasonRatingKey(ctx context.Context, client *http.Client, plexURL, ple
 // finale, or Plex's /children not covering it for some other reason), looks
 // up the next season's ratingKey and tries its episode 1 instead.
 func fetchNextEpisodeFilenameAcrossSeasons(ctx context.Context, client *http.Client, plexURL, plexToken string, s plexSession) plexEpisodeTarget {
-	if name := fetchNextEpisodeFilename(ctx, client, plexURL, plexToken, s.ParentRatingKey, s.Index+1); name != "" {
-		return plexEpisodeTarget{Filename: name, Season: s.ParentIndex, Episode: s.Index + 1}
+	if p := fetchNextEpisodePath(ctx, client, plexURL, plexToken, s.ParentRatingKey, s.Index+1); p != "" {
+		return plexEpisodeTarget{Filename: path.Base(p), Path: p, Season: s.ParentIndex, Episode: s.Index + 1}
 	}
 	nextSeasonKey := fetchSeasonRatingKey(ctx, client, plexURL, plexToken, s.GrandparentRatingKey, s.ParentIndex+1)
 	if nextSeasonKey == "" {
 		return plexEpisodeTarget{}
 	}
-	name := fetchNextEpisodeFilename(ctx, client, plexURL, plexToken, nextSeasonKey, 1)
-	if name == "" {
+	p := fetchNextEpisodePath(ctx, client, plexURL, plexToken, nextSeasonKey, 1)
+	if p == "" {
 		return plexEpisodeTarget{}
 	}
-	return plexEpisodeTarget{Filename: name, Season: s.ParentIndex + 1, Episode: 1}
+	return plexEpisodeTarget{Filename: path.Base(p), Path: p, Season: s.ParentIndex + 1, Episode: 1}
+}
+
+// findFileByPlexPath resolves the exact cli_mount file from the path Plex
+// reports, without any name parsing:
+//   - a cli_debrid symlink is followed when this process can see it (the
+//     library mounted at the same path); its target ends in <entry>/<file>.
+//   - otherwise the path itself is tried, for Plex reading the mount directly.
+func findFileByPlexPath(mgr *manager.Manager, plexPath string) *manager.FileInfo {
+	if mgr == nil {
+		return nil
+	}
+	for _, p := range plexPathCandidates(plexPath) {
+		if f := findFileByMountPath(mgr, p); f != nil {
+			return f
+		}
+	}
+	return nil
+}
+
+// plexPathCandidates returns the symlink target first when plexPath is a
+// symlink this process can read, then plexPath itself.
+func plexPathCandidates(plexPath string) []string {
+	if plexPath == "" {
+		return nil
+	}
+	var out []string
+	if target, err := os.Readlink(plexPath); err == nil {
+		if !filepath.IsAbs(target) {
+			target = filepath.Join(filepath.Dir(plexPath), target)
+		}
+		out = append(out, target)
+	}
+	return append(out, plexPath)
+}
+
+// findFileByMountPath looks for a cli_mount entry named after the file's
+// parent folder (or the one above it, for releases with a season subfolder)
+// and returns the file of that name in it, or its only video file when the
+// name inside differs.
+func findFileByMountPath(mgr *manager.Manager, p string) *manager.FileInfo {
+	base := strings.ToLower(filepath.Base(p))
+	dir := filepath.Dir(p)
+	for level := 0; level < 2 && dir != "." && dir != "/"; level++ {
+		entryDir, children := mgr.GetTorrentChildren(filepath.Base(dir))
+		if entryDir != nil {
+			var onlyVideo *manager.FileInfo
+			videos := 0
+			for i := range children {
+				child := &children[i]
+				if child.IsDir() {
+					continue
+				}
+				if strings.ToLower(child.Name()) == base {
+					return child
+				}
+				if child.Size() >= minPlausibleEpisodeSize {
+					videos++
+					onlyVideo = child
+				}
+			}
+			if videos == 1 {
+				return onlyVideo
+			}
+		}
+		dir = filepath.Dir(dir)
+	}
+	return nil
 }
 
 // findFileByBasename does an exact (case-insensitive) filename match across
@@ -231,12 +318,15 @@ func findFileByBasename(mgr *manager.Manager, basename string) *manager.FileInfo
 		return nil
 	}
 	wantLower := strings.ToLower(basename)
+	wantStem := strings.TrimSuffix(wantLower, strings.ToLower(filepath.Ext(basename)))
 	_, torrents := mgr.GetEntryChildren(manager.EntryAllFolder)
 	for _, entry := range torrents {
 		if !entry.IsDir() {
 			continue
 		}
 		_, children := mgr.GetTorrentChildren(entry.Name())
+		var onlyVideo *manager.FileInfo
+		videos := 0
 		for i := range children {
 			child := &children[i]
 			if child.IsDir() {
@@ -245,6 +335,15 @@ func findFileByBasename(mgr *manager.Manager, basename string) *manager.FileInfo
 			if strings.ToLower(child.Name()) == wantLower {
 				return child
 			}
+			if child.Size() >= minPlausibleEpisodeSize {
+				videos++
+				onlyVideo = child
+			}
+		}
+		// The release name often names the entry folder while the file inside
+		// is obfuscated or renamed; a single-video folder is unambiguous.
+		if videos == 1 && strings.ToLower(entry.Name()) == wantStem {
+			return onlyVideo
 		}
 	}
 	return nil
@@ -357,7 +456,15 @@ func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, ple
 			var next *manager.FileInfo
 			target := fetchNextEpisodeFilenameAcrossSeasons(ctx, client, plexURL, plexToken, s)
 			if target.Filename != "" {
-				next = findFileByBasename(mgr, target.Filename)
+				// Plex sees cli_debrid's renamed symlink; the release name it was
+				// made from sits in its trailing parentheses.
+				next = findFileByPlexPath(mgr, target.Path)
+				for _, candidate := range mountBasenameCandidates(target.Filename) {
+					if next != nil {
+						break
+					}
+					next = findFileByBasename(mgr, candidate)
+				}
 				if next == nil {
 					parsed := utils.ParseTorrentName(target.Filename)
 					title := parsed.Title
@@ -510,6 +617,9 @@ func findEpisode(mgr *manager.Manager, showTitle string, wantSeason, wantEp int)
 			continue
 		}
 		entryParsed := utils.ParseTorrentName(entry.Name())
+		if entryParsed.Title == "" {
+			entryParsed.Title = titleBeforeEpisodeMarker(entry.Name())
+		}
 		// Fast pre-filter: skip on a confident season mismatch only - NOT on
 		// title, and NOT on IsTV/season-zero. A season-pack folder name with
 		// no episode number in it (e.g. "Show.S09.2021.WEB-DL...", no "E##")
@@ -542,6 +652,9 @@ func findEpisode(mgr *manager.Manager, showTitle string, wantSeason, wantEp int)
 				continue
 			}
 			cp := utils.ParseTorrentName(child.Name())
+			if cp.Title == "" {
+				cp.Title = titleBeforeEpisodeMarker(child.Name())
+			}
 			if !matchesEpisodeIdentity(wantTitle, wantSeason, wantEp, entryParsed, cp) {
 				continue
 			}
@@ -549,6 +662,20 @@ func findEpisode(mgr *manager.Manager, showTitle string, wantSeason, wantEp int)
 		}
 	}
 	return nil
+}
+
+var episodeMarkerRE = regexp.MustCompile(`(?i)s\d{1,2}[\s._-]?e\d{1,3}`)
+
+// titleBeforeEpisodeMarker is the raw text before an SxxEyy marker, for names
+// whose title the release parser drops entirely. It does that to numeric show
+// titles: "24.S02E01.1080p.BluRay..." parses with an empty title, so every
+// episode of "24" failed to match its Plex show title.
+func titleBeforeEpisodeMarker(name string) string {
+	loc := episodeMarkerRE.FindStringIndex(name)
+	if loc == nil || loc[0] == 0 {
+		return ""
+	}
+	return strings.TrimSpace(strings.NewReplacer(".", " ", "_", " ").Replace(name[:loc[0]]))
 }
 
 func matchesEpisodeIdentity(wantTitle string, wantSeason, wantEp int, entryParsed, fileParsed utils.ParsedName) bool {
@@ -711,6 +838,9 @@ func resolveCurrentPlayingFile(mgr *manager.Manager, s plexSession) *manager.Fil
 	//  2. Symlink release name — cli_debrid "(Release.mkv)" in trailing parens
 	//  3. Parse Plex basename — title/year or SxxExx from symlink-style names
 	//  4. Plex metadata — findMovie(title,year) / findEpisode(show,S,E) fallback
+	if file := findFileByPlexPath(mgr, s.sessionPath()); file != nil {
+		return file
+	}
 	for _, basename := range mountBasenameCandidates(s.sessionBasename()) {
 		if file := findFileByBasename(mgr, basename); file != nil {
 			return file

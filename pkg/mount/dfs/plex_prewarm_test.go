@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -95,5 +96,49 @@ func TestPrewarmMissCanRetry(t *testing.T) {
 	seen.forget("episode")
 	if !seen.markIfNew("episode") {
 		t.Fatal("attempt remained suppressed after a miss was forgotten")
+	}
+}
+
+// ParseTorrentName drops numeric show titles entirely ("24.S02E01..." ->
+// title ""), so episodes of "24" never matched Plex's show title.
+func TestNumericShowTitleMatches(t *testing.T) {
+	if got := titleBeforeEpisodeMarker("24.S02E01.1080p.BluRay.x264-SHORTBREHD.mkv"); got != "24" {
+		t.Fatalf("titleBeforeEpisodeMarker = %q, want 24", got)
+	}
+	if got := titleBeforeEpisodeMarker("S02E01.mkv"); got != "" {
+		t.Fatalf("no title before marker should give empty, got %q", got)
+	}
+	file := utils.ParseTorrentName("24.S02E01.1080p.BluRay.x264-SHORTBREHD.mkv")
+	if file.Title != "" {
+		t.Skipf("parser now keeps the title (%q); fallback not needed", file.Title)
+	}
+	want := normalizeEpisodeTitle("24")
+	if matchesEpisodeIdentity(want, 2, 1, utils.ParsedName{}, file) {
+		t.Fatal("expected the raw parse to miss (documents the bug)")
+	}
+	file.Title = titleBeforeEpisodeMarker("24.S02E01.1080p.BluRay.x264-SHORTBREHD.mkv")
+	if !matchesEpisodeIdentity(want, 2, 1, utils.ParsedName{}, file) {
+		t.Fatal("with the fallback title, 24 S02E01 should match")
+	}
+}
+
+// Plex reports the symlink path; when it is readable here, its target (the
+// exact <entry>/<file> in the mount) is tried first.
+func TestPlexPathCandidatesFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := dir + "/mnt/__all__/24.S02.1080p.BluRay.x264-SHORTBREHD/24.S02E01.mkv"
+	link := dir + "/library/24 (2001) - S02E01 - (24.S02E01.1080p.BluRay.x264-SHORTBREHD).mkv"
+	if err := os.MkdirAll(dir+"/library", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	got := plexPathCandidates(link)
+	if len(got) != 2 || got[0] != target || got[1] != link {
+		t.Fatalf("candidates = %v, want [target, link]", got)
+	}
+	if got := plexPathCandidates(dir + "/not-a-link.mkv"); len(got) != 1 {
+		t.Fatalf("plain path: %v", got)
 	}
 }
