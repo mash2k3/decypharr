@@ -316,7 +316,7 @@ func (m *providerMonitor) performHealthCheck(ctx context.Context, provider confi
 	defer release()
 
 	pingStarted := time.Now()
-	if err := conn.ping(); err != nil {
+	if err := conn.ping(0); err != nil {
 		message := sanitizeProviderError(err, provider)
 		if strings.Contains(strings.ToLower(message), "unexpected date response") {
 			health := ProviderHealth{

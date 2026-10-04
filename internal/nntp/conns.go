@@ -235,6 +235,13 @@ type Connection struct {
 	backgroundBudgetHeld atomic.Bool
 	// streamBudgetHeld is set when this checkout counted against stream reserve.
 	streamBudgetHeld atomic.Bool
+
+	// writeTimeout bounds the next command write instead of HandshakeTimeout.
+	// ping sets it for its DATE so the health check has one budget for the
+	// whole round trip; otherwise the write kept the 10s handshake deadline
+	// and a peer that stopped reading blocked a "1.5s" ping for 10s. Only the
+	// goroutine that owns the connection touches it.
+	writeTimeout time.Duration
 }
 
 func (c *Connection) recordBodyUsage(bytes int64) {
@@ -316,13 +323,22 @@ func (c *Connection) startTLS() error {
 	return nil
 }
 
-// ping sends a simple command to test the connection
-func (c *Connection) ping() error {
+// ping sends a simple command to test the connection. timeout bounds the
+// whole DATE round trip; <=0 uses PingTimeout. A checkout ping is latency a
+// reader waits on and stays tight; the reaper's keepalive can wait longer.
+func (c *Connection) ping(timeout time.Duration) error {
 	if c.conn == nil {
 		return NewConnectionError(errors.New("connection is nil"))
 	}
-	_ = c.conn.SetDeadline(utils.Now().Add(timeouts.PingTimeout))
-	defer func() { _ = c.conn.SetDeadline(time.Time{}) }()
+	if timeout <= 0 {
+		timeout = timeouts.PingTimeout
+	}
+	_ = c.conn.SetDeadline(utils.Now().Add(timeout))
+	c.writeTimeout = timeout
+	defer func() {
+		c.writeTimeout = 0
+		_ = c.conn.SetDeadline(time.Time{})
+	}()
 
 	if err := c.sendCommand("DATE"); err != nil {
 		return NewConnectionError(err)
@@ -343,7 +359,11 @@ func (c *Connection) sendCommand(command string) error {
 }
 
 func (c *Connection) sendCommandArg(command, arg string) error {
-	_ = c.conn.SetWriteDeadline(utils.Now().Add(timeouts.HandshakeTimeout))
+	writeTimeout := timeouts.HandshakeTimeout
+	if c.writeTimeout > 0 {
+		writeTimeout = c.writeTimeout
+	}
+	_ = c.conn.SetWriteDeadline(utils.Now().Add(writeTimeout))
 	defer func() { _ = c.conn.SetWriteDeadline(time.Time{}) }()
 
 	if _, err := c.writer.WriteString(command); err != nil {
