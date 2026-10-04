@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/Tensai75/nzbparser"
 	"github.com/google/uuid"
@@ -1030,11 +1031,27 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 			return fetchResult{index: i, err: fmt.Errorf("no segments in file %d", i)}
 		}
 		var data *nntp.YencMetadata
-		err := p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
-			d, e := conn.GetHeaderPrefix(file.Segments[0].Id, metadataOnly)
-			data = d
-			return e
-		})
+		var err error
+		// A missing header means every segment of the group gets an estimated
+		// size, and estimated slots that are bigger than the real articles make
+		// reads fail later. Retry transient failures; a 430 won't change.
+		for attempt := 0; attempt < metadataFetchAttempts; attempt++ {
+			if attempt > 0 {
+				select {
+				case <-ctx.Done():
+					return fetchResult{index: i, err: ctx.Err()}
+				case <-time.After(time.Duration(attempt) * 500 * time.Millisecond):
+				}
+			}
+			err = p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
+				d, e := conn.GetHeaderPrefix(file.Segments[0].Id, metadataOnly)
+				data = d
+				return e
+			})
+			if err == nil || nntp.IsArticleNotFoundError(err) || ctx.Err() != nil {
+				break
+			}
+		}
 		if err != nil {
 			return fetchResult{index: i, err: err}
 		}
@@ -1080,6 +1097,11 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 	firstMetaKey := fileMetaKey(group.Files[0])
 	firstMeta, hasFirst := group.fileMeta[firstMetaKey]
 	if !hasFirst {
+		// Volumes of one post share a segment size, so another file's real
+		// header beats the 97% estimate.
+		firstMeta, hasFirst = borrowFileMeta(group)
+	}
+	if !hasFirst {
 		reportedBytes := int64(group.Files[0].Segments[0].Bytes)
 		if reportedBytes <= 0 {
 			reportedBytes = 750000
@@ -1105,6 +1127,30 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 		segmentSize:  firstMeta.segmentSize,
 	}
 	return nil
+}
+
+const metadataFetchAttempts = 3
+
+// borrowFileMeta builds first-file metadata from another file's fetched yEnc
+// header when the first file's couldn't be read. A non-last file's size is
+// used as-is (volumes are the same size); the last file only lends its
+// segment size, since it is usually shorter.
+func borrowFileMeta(group *FileGroup) (filePartMeta, bool) {
+	firstSegs := int64(len(group.Files[0].Segments))
+	var fromLast filePartMeta
+	for i, f := range group.Files {
+		meta, ok := group.fileMeta[fileMetaKey(f)]
+		if !ok || meta.segmentSize <= 0 {
+			continue
+		}
+		if i < len(group.Files)-1 && meta.fileSize > 0 && int64(len(f.Segments)) == firstSegs {
+			return filePartMeta{segmentSize: meta.segmentSize, fileSize: meta.fileSize}, true
+		}
+		if fromLast.segmentSize == 0 {
+			fromLast = filePartMeta{segmentSize: meta.segmentSize, fileSize: meta.segmentSize * firstSegs}
+		}
+	}
+	return fromLast, fromLast.segmentSize > 0
 }
 
 // Process regular media files
