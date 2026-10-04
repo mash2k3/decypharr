@@ -833,6 +833,40 @@ func (u *Usenet) IsFilePermanentlyFailed(nzoID, filename string) error {
 	return nil
 }
 
+// ClearFileFailures forgets every permanent-failure mark on an NZB's files:
+// the in-memory flag, the persisted IsDeleted, and any cached re-measure
+// answer. The next read tests each file again, and a file whose articles
+// really are gone is marked again by that read. Used by a manual recheck, so
+// marks written by older builds (a short segment from an estimated layout
+// counted as a missing article) can be undone. Returns how many files were
+// marked.
+func (u *Usenet) ClearFileFailures(nzoID string) (int, error) {
+	nzb, err := u.nzbStorage.GetNZB(nzoID)
+	if err != nil {
+		return 0, err
+	}
+	cleared := 0
+	for i := range nzb.Files {
+		key := fsKey(nzoID, nzb.Files[i].Name)
+		_, inMemory := u.failedFiles.LoadAndDelete(key)
+		u.relayoutAttempts.Delete(key)
+		if nzb.Files[i].IsDeleted || inMemory {
+			cleared++
+			u.retireEntry(key)
+		}
+		nzb.Files[i].IsDeleted = false
+	}
+	if cleared == 0 {
+		return 0, nil
+	}
+	if err := u.nzbStorage.AddNZB(nzb); err != nil {
+		return 0, fmt.Errorf("saving cleared file status: %w", err)
+	}
+	u.logger.Info().Str("nzo_id", nzoID).Str("name", nzb.Name).Int("files", cleared).
+		Msg("Cleared permanent-failure marks for a recheck")
+	return cleared, nil
+}
+
 func (u *Usenet) getFiles(nzoID string, filenames []string) (map[string]*storage.NZBFile, error) {
 	nzb, err := u.nzbStorage.GetNZB(nzoID)
 	if err != nil {

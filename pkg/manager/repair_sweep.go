@@ -1812,6 +1812,11 @@ func (r *Repair) RecheckEntry(ctx context.Context, entryName string, fix bool) (
 		return nil, fmt.Errorf("entry %q not found", entryName)
 	}
 
+	// A manual recheck tests the files from scratch: a dead mark persisted
+	// by an older build (or a misjudged read) would otherwise answer the
+	// probe without any read. Real missing articles mark the file again.
+	r.clearUsenetFailureMarks(item)
+
 	runID := "recheck-" + entryName
 	c := &candidate{name: entryName, item: item}
 
@@ -1842,6 +1847,31 @@ func (r *Repair) RecheckEntry(ctx context.Context, entryName string, fix bool) (
 	h.Status = storage.HealthRepairing
 	h.ActiveRunID = runID
 	return h, nil
+}
+
+// clearUsenetFailureMarks clears the permanent-failure marks of every NZB
+// behind item's files. Torrent files are left alone.
+func (r *Repair) clearUsenetFailureMarks(item *storage.EntryItem) {
+	if r.manager.usenet == nil || item == nil {
+		return
+	}
+	seen := make(map[string]struct{}, 1)
+	for _, f := range item.Files {
+		if f == nil || f.InfoHash == "" {
+			continue
+		}
+		if _, ok := seen[f.InfoHash]; ok {
+			continue
+		}
+		seen[f.InfoHash] = struct{}{}
+		entry, err := r.manager.GetEntry(f.InfoHash)
+		if err != nil || entry == nil || !entry.IsNZB() {
+			continue
+		}
+		if _, err := r.manager.usenet.ClearFileFailures(f.InfoHash); err != nil {
+			r.logger.Warn().Err(err).Str("entry", item.Name).Msg("Recheck: could not clear usenet failure marks")
+		}
+	}
 }
 
 // RecheckMedia kicks off a recheck for every entry that an Arr's media-id
