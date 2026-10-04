@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
@@ -32,6 +33,7 @@ func TestSyncReenablesHealthyDisabledAccount(t *testing.T) {
 	var logs bytes.Buffer
 	m, acc := newTestManager(&logs)
 	m.Disable(acc)
+	acc.disabledAt.Store(time.Now().Add(-accountRecoveryInterval - time.Minute).UnixNano())
 
 	m.Sync(func(*Account) error { return nil })
 
@@ -66,5 +68,20 @@ func TestNoActiveAccountWarningIsThrottled(t *testing.T) {
 
 	if got := strings.Count(logs.String(), "No active accounts"); got != 1 {
 		t.Fatalf("expected one no-active-account warning, got %d: %s", got, logs.String())
+	}
+}
+
+// An account disabled for a bandwidth/quota error must not come back on the
+// next successful sync: that made it flip between disabled and enabled every
+// sync cycle while the limit was still in force.
+func TestSyncKeepsRecentlyDisabledAccountDisabled(t *testing.T) {
+	var logs bytes.Buffer
+	m, acc := newTestManager(&logs)
+	m.Disable(acc)
+
+	m.Sync(func(*Account) error { return nil })
+
+	if !acc.Disabled.Load() {
+		t.Fatal("a just-disabled account was re-enabled by a successful sync")
 	}
 }

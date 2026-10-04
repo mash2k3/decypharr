@@ -32,6 +32,13 @@ type Manager struct {
 
 const noActiveWarningInterval = time.Minute
 
+// accountRecoveryInterval is how long a disabled account stays disabled
+// before a successful sync may re-enable it. Accounts are disabled for
+// bandwidth/quota errors on download links, which a successful torrent-list
+// sync says nothing about; re-enabling on every sync made such an account
+// flip between disabled and enabled each cycle.
+const accountRecoveryInterval = time.Hour
+
 func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger zerolog.Logger) *Manager {
 	m := &Manager{
 		debrid:   debridConf.Name,
@@ -299,7 +306,7 @@ func (m *Manager) Sync(syncer SyncFunc) {
 				m.UpdateAccount(acc)
 				return
 			}
-			if acc.Disabled.Load() {
+			if acc.Disabled.Load() && acc.DisabledFor(utils.Now()) >= accountRecoveryInterval {
 				acc.Reset()
 				m.lastNoActiveWarning.Store(0)
 				m.logger.Info().Str("debrid", m.debrid).Str("account_token", utils.Mask(acc.Token)).Msg("Re-enabled account after successful sync")
