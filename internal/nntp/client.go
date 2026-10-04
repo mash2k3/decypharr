@@ -468,8 +468,9 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 						currentProvider = newProvider
 						return execErr // Retriable
 
-					case ErrorTypeArticleNotFound:
-						// Article not found - not retriable, try next provider
+					case ErrorTypeArticleNotFound, ErrorTypeArticleMismatch:
+						// Article not found, or a different article under
+						// this Message-ID - not retriable, try next provider
 						return retry.Unrecoverable(execErr)
 
 					default:
@@ -511,6 +512,10 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 			switch nntpErr.Type {
 			case ErrorTypeArticleNotFound:
 				excludeForArticleNotFound(&exclusions, connProvider)
+			case ErrorTypeArticleMismatch:
+				// Only this host: providers sharing a backbone have been
+				// seen to disagree on what a Message-ID holds.
+				exclusions.excludeHost(connProvider.Host)
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
 				exclusions.excludeHost(connProvider.Host)
 			default:

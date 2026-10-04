@@ -3,6 +3,7 @@ package reader
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -36,6 +37,12 @@ type SegmentFetcher struct {
 	prefetchCh     chan int
 	prefetchQueued []atomic.Uint64 // one deduplication bit per segment
 	prefetchWg     sync.WaitGroup
+
+	// acceptShortArticles is set once every provider served the same short
+	// article for a segment: the stored layout overstates the articles
+	// (estimated sizes), so checking the rest of this file's segments would
+	// only re-download each one from every provider.
+	acceptShortArticles atomic.Bool
 
 	// Lifecycle
 	ctx    context.Context
@@ -210,7 +217,40 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 	// ExecuteWithFailover already retries per provider and across providers —
 	// a single call is sufficient.  An outer retry loop would multiply the
 	// total attempts by retries×providers, leading to very long failure times.
-	err := sf.client.ExecuteWithFailover(downloadCtx, func(conn *nntp.Connection) error {
+	// The one exception: when every provider served an article too short for
+	// the segment, fetch once more accepting it (see acceptShortArticles).
+	err := sf.fetchBody(downloadCtx, seg, segIdx, messageID)
+	if err != nil && nntp.IsArticleMismatchError(err) && downloadCtx.Err() == nil {
+		if sf.acceptShortArticles.CompareAndSwap(false, true) {
+			sf.logger.Warn().Int("segment", segIdx).Err(err).
+				Msg("every provider served a short article; accepting short articles for this file")
+		}
+		err = sf.fetchBody(downloadCtx, seg, segIdx, messageID)
+	}
+
+	if err != nil {
+		sf.stats.DownloadErrors.Add(1)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			sf.cache.ReleaseFetching(segIdx)
+			return err
+		}
+		sf.cache.MarkFailed(segIdx, err)
+		return err
+	}
+
+	sf.stats.Downloads.Add(1)
+	return nil
+}
+
+// fetchBody downloads one segment's body into the cache, failing over across
+// providers. A provider whose article decodes shorter than the segment's slot
+// holds a different post under that Message-ID (seen on Easynews/Frugal for
+// obfuscated releases while other providers had the real one); that is an
+// ArticleMismatch, so the next provider is tried instead of committing data
+// that belongs to another file.
+func (sf *SegmentFetcher) fetchBody(downloadCtx context.Context, seg *SegmentMeta, segIdx int, messageID string) error {
+	expected := seg.SegmentDataStart + seg.Bytes
+	return sf.client.ExecuteWithFailover(downloadCtx, func(conn *nntp.Connection) error {
 		stopCancel := context.AfterFunc(downloadCtx, func() {
 			_ = conn.Close()
 		})
@@ -246,6 +286,14 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 			}
 		}
 
+		if seg.Bytes > 0 && n < expected && !sf.acceptShortArticles.Load() {
+			writer.Discard()
+			return &nntp.Error{
+				Type:    nntp.ErrorTypeArticleMismatch,
+				Message: fmt.Sprintf("article decoded to %d bytes, segment needs %d", n, expected),
+			}
+		}
+
 		// Commit (updates cache state to StateOnDisk). A decoded body that is
 		// entirely consumed by the yEnc dataStart skip (truncated/corrupt
 		// article whose real payload is shorter than the header) commits
@@ -262,19 +310,6 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 
 		return nil
 	})
-
-	if err != nil {
-		sf.stats.DownloadErrors.Add(1)
-		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
-			sf.cache.ReleaseFetching(segIdx)
-			return err
-		}
-		sf.cache.MarkFailed(segIdx, err)
-		return err
-	}
-
-	sf.stats.Downloads.Add(1)
-	return nil
 }
 
 func (sf *SegmentFetcher) markPrefetchQueued(segIdx int) bool {

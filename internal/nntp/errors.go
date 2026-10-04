@@ -38,6 +38,12 @@ const (
 	// layout, so it is not ArticleNotFound and nothing is marked failed until
 	// the layout has been re-measured.
 	ErrorTypeLayoutMismatch
+	// ErrorTypeArticleMismatch: a provider served an article that can't be
+	// this segment (it decodes shorter than the segment's slot). Providers
+	// can hold a different post under the same Message-ID, so failover tries
+	// the next provider. Never permanent: another provider may hold the
+	// real article.
+	ErrorTypeArticleMismatch
 )
 
 // Error represents an NNTP-specific error
@@ -119,6 +125,8 @@ func (et ErrorType) String() string {
 		return "YENC_DECODE"
 	case ErrorTypeLayoutMismatch:
 		return "LAYOUT_MISMATCH"
+	case ErrorTypeArticleMismatch:
+		return "ARTICLE_MISMATCH"
 	default:
 		return "UNKNOWN"
 	}
@@ -229,6 +237,16 @@ func IsArticleNotFoundError(err error) bool {
 	var nntpErr *Error
 	if errors.As(err, &nntpErr) {
 		return nntpErr.Type == ErrorTypeArticleNotFound
+	}
+	return false
+}
+
+// IsArticleMismatchError reports whether err is every tried provider serving
+// an article too short for its segment (see ErrorTypeArticleMismatch).
+func IsArticleMismatchError(err error) bool {
+	var nntpErr *Error
+	if errors.As(err, &nntpErr) {
+		return nntpErr.Type == ErrorTypeArticleMismatch
 	}
 	return false
 }
