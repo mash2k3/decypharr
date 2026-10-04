@@ -22,6 +22,8 @@ type Account struct {
 
 	// Account reactivation tracking
 	DisableCount atomic.Int32 `json:"disable_count"`
+	// disabledAt is when the account was last disabled (unix nanoseconds, 0 if never).
+	disabledAt atomic.Int64
 }
 
 func (a *Account) Equals(other *Account) bool {
@@ -108,9 +110,24 @@ func (a *Account) StoreDownloadLinks(dls map[string]*types.DownloadLink) {
 func (a *Account) MarkDisabled() {
 	a.Disabled.Store(true)
 	a.DisableCount.Add(1)
+	a.disabledAt.Store(time.Now().UnixNano())
 }
 
 func (a *Account) Reset() {
 	a.DisableCount.Store(0)
 	a.Disabled.Store(false)
+	a.disabledAt.Store(0)
+}
+
+// DisabledFor returns how long the account has been disabled, or 0 if it isn't.
+func (a *Account) DisabledFor(now time.Time) time.Duration {
+	if !a.Disabled.Load() {
+		return 0
+	}
+	at := a.disabledAt.Load()
+	if at == 0 {
+		// Disabled without a timestamp (e.g. restored state): treat as long ago.
+		return time.Duration(1<<63 - 1)
+	}
+	return now.Sub(time.Unix(0, at))
 }

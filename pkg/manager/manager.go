@@ -54,7 +54,9 @@ type Manager struct {
 	queue        *Queue
 
 	// downloading
-	refreshSG   singleflight.Group
+	refreshSG singleflight.Group
+	// submitSG coalesces concurrent submissions of the same torrent.
+	submitSG    singleflight.Group
 	linkService *link.Service
 
 	// repair
@@ -251,6 +253,11 @@ func (m *Manager) initUsenet() {
 		return
 	}
 	m.usenet = usenetClient
+	// A file whose layout was re-measured from yEnc headers may have a new
+	// size; keep the entry's listing in step.
+	m.usenet.SetLayoutFixedHook(func(nzb *storage.NZB) {
+		m.syncEntryFileSizes(nzb, nzb.TotalSize)
+	})
 	m.startInteractiveMonitor(m.config)
 }
 
@@ -624,6 +631,17 @@ func (m *Manager) ReportLiveReadFailure(infoHash, entryName, fileName string, si
 		return
 	}
 	m.repair.RecordLiveReadFailure(infoHash, entryName, fileName, size)
+}
+
+// ReportPermanentUsenetReadFailure is ReportLiveReadFailure for read paths that
+// don't classify errors themselves (WebDAV). It only marks the file broken when
+// the usenet layer has flagged it permanently failed (missing article, or a
+// segment that decodes short), so a timeout or other transient error never does.
+func (m *Manager) ReportPermanentUsenetReadFailure(infoHash, entryName, fileName string, size int64) {
+	if m.usenet == nil || m.usenet.IsFilePermanentlyFailed(infoHash, fileName) == nil {
+		return
+	}
+	m.ReportLiveReadFailure(infoHash, entryName, fileName, size)
 }
 
 // RefreshTorrent forces an immediate sync for a specific torrent by infohash.

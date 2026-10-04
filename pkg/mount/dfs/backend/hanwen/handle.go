@@ -15,6 +15,7 @@ import (
 	"github.com/hanwen/go-fuse/v2/fuse"
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/nntp"
+	"github.com/sirrobot01/decypharr/pkg/manager"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
 )
 
@@ -28,6 +29,8 @@ var (
 // Handle implements file operations using the new DFS implementation
 type Handle struct {
 	file       *File
+	info       *manager.FileInfo
+	content    []byte
 	streamFile *vfs.StreamingFile
 	sidecarFd  *os.File // pre-opened fd for sidecar reads
 	closed     atomic.Bool
@@ -44,7 +47,9 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 	}
 
 	// Static content (e.g. version.txt): serve from the in-memory buffer.
-	if len(fh.file.content) > 0 {
+	// Check this first — streamFile is nil for static files, so dereferencing
+	// it below would panic.
+	if len(fh.content) > 0 {
 		data := fh.readFromStaticContent(off, int64(len(dest)))
 		return fuse.ReadResultData(data), 0
 	}
@@ -80,14 +85,20 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 		case errors.Is(err, context.Canceled):
 			return nil, syscall.EINTR
 		default:
-			fh.logger.Error().Err(err).Str("file", fh.file.info.Name()).Int64("offset", off).Msg("Read failed, returning EIO")
+			fh.logger.Error().Err(err).Str("file", fh.info.Name()).Int64("offset", off).Msg("Read failed, returning EIO")
 			if fh.file.vfs != nil {
 				if mgr := fh.file.vfs.Manager(); mgr != nil {
-					info := fh.file.info
-					if !nntp.IsPoolCapacityError(err) {
-						mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
-					} else {
+					info := fh.info
+					switch {
+					case nntp.IsPoolCapacityError(err):
 						fh.logger.Warn().Err(err).Str("file", info.Name()).Msg("Read failed due to NNTP pool contention; not marking broken")
+					case nntp.IsLayoutMismatchError(err):
+						// A short segment under a layout that couldn't be re-measured, or one
+						// just fixed (the retry reads the new layout). The usenet layer marks
+						// the file failed itself when the data is proven gone.
+						fh.logger.Warn().Err(err).Str("file", info.Name()).Msg("Read hit a file layout mismatch; not marking broken")
+					default:
+						mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
 					}
 				}
 			}
@@ -100,7 +111,7 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 
 // readFromStaticContent handles static content
 func (fh *Handle) readFromStaticContent(offset, size int64) []byte {
-	content := fh.file.content
+	content := fh.content
 	end := offset + size
 	if end > int64(len(content)) {
 		end = int64(len(content))
@@ -125,7 +136,7 @@ func (fh *Handle) Release(ctx context.Context) syscall.Errno {
 	if fh.streamFile != nil {
 		fh.streamFile.Close()
 		if fh.file != nil && fh.file.vfs != nil {
-			fh.file.vfs.ReleaseFile(fh.file.info)
+			fh.file.vfs.ReleaseFile(fh.info)
 		}
 	}
 

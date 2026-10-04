@@ -25,6 +25,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -67,6 +68,9 @@ type fsEntry struct {
 	readerErr     error                   // Error from reader creation (if any)
 	refCount      atomic.Int32
 	lastAccessed  atomic.Int64 // Unix timestamp
+	// retired: removed from the map after its file's layout changed. Streams
+	// still holding it finish on the old layout; the last release closes it.
+	retired atomic.Bool
 }
 
 // fsEntryTombstone marks an entry claimed for teardown. Once refCount holds
@@ -226,6 +230,18 @@ type Usenet struct {
 	onStreamBytes func(nzoID, filename string, n int64, probe bool)
 
 	fs *xsync.Map[string, *fsEntry]
+
+	// Layout re-measure (relayout.go).
+	relayoutSG       singleflight.Group
+	relayoutAttempts sync.Map // fsKey -> relayoutAttempt
+	onLayoutFixed    func(nzb *storage.NZB)
+	headerFetcher    func(ctx context.Context, messageID string) (*nntp.YencMetadata, error) // tests only
+}
+
+// SetLayoutFixedHook is called after a file's layout was re-measured and
+// saved, so the manager can update the entry's file sizes.
+func (u *Usenet) SetLayoutFixedHook(fn func(nzb *storage.NZB)) {
+	u.onLayoutFixed = fn
 }
 
 // fsKey builds a cache key for fs map entries efficiently.
@@ -319,7 +335,9 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 
 	fsCtx := context.Background()
 
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger)
+	nzoID, name := file.NzbID, file.Name
+	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger,
+		fs.WithShortTailHook(func() { u.relayoutTail(nzoID, name) }))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -384,15 +402,31 @@ func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (
 	}
 }
 
-// releaseFS releases an fs entry using a pre-computed key (avoids redundant allocation).
-func (u *Usenet) releaseFS(key string) {
-	entry, ok := u.fs.Load(key)
+// releaseEntry drops a reference taken by getOrCreateEntry. It releases the
+// entry itself rather than whatever the map now holds under its key: a
+// retired entry has been replaced there, and the last release closes it.
+func (u *Usenet) releaseEntry(entry *fsEntry) {
+	if entry == nil {
+		return
+	}
+	entry.refCount.Add(-1)
+	entry.lastAccessed.Store(utils.NowUnix())
+	if entry.retired.Load() && entry.claimForCleanup() {
+		entry.cleanup()
+	}
+}
+
+// retireEntry removes key's entry from the map so the next stream builds one
+// from the current layout, and closes it now if no stream holds it.
+func (u *Usenet) retireEntry(key string) {
+	entry, ok := u.fs.LoadAndDelete(key)
 	if !ok {
 		return
 	}
-
-	entry.refCount.Add(-1)
-	entry.lastAccessed.Store(utils.NowUnix())
+	entry.retired.Store(true)
+	if entry.claimForCleanup() {
+		entry.cleanup()
+	}
 }
 
 // cleanupIdleFS removes sessions with refCount=0 that haven't been used recently
@@ -725,23 +759,29 @@ func (u *Usenet) getFile(nzoID, filename string) (*storage.NZBFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metadata load failed: %w", err)
 	}
+	// NZBs imported before names were made unique can hold two files with the
+	// same name. The manager's entry (keyed by name) lists the LAST one, so
+	// stream that one too; serving the first gave a different size than the
+	// listing and every read past its end failed.
+	var match *storage.NZBFile
 	for i := range nzb.Files {
-		source := nzb.Files[i]
-		if source.Name != filename {
-			continue
+		if nzb.Files[i].Name == filename {
+			match = &nzb.Files[i]
 		}
-		if source.IsDeleted {
-			return nil, customerror.NewArticleNotFoundError(
-				fmt.Errorf("file %s is permanently unavailable on Usenet", filename),
-			)
-		}
-		file := source
-		if file.NzbID == "" {
-			file.NzbID = nzoID
-		}
-		return &file, nil
 	}
-	return nil, fmt.Errorf("file %s not found in NZB %s", filename, nzoID)
+	if match == nil {
+		return nil, fmt.Errorf("file %s not found in NZB %s", filename, nzoID)
+	}
+	if match.IsDeleted {
+		return nil, customerror.NewArticleNotFoundError(
+			fmt.Errorf("file %s is permanently unavailable on Usenet", filename),
+		)
+	}
+	file := *match
+	if file.NzbID == "" {
+		file.NzbID = nzoID
+	}
+	return &file, nil
 }
 
 // markNZBFileDeleted marks a specific NZB file as permanently deleted in storage so the
@@ -752,7 +792,9 @@ func (u *Usenet) markNZBFileDeleted(nzoID, filename string) {
 		u.logger.Warn().Err(err).Str("nzo_id", nzoID).Str("file", filename).Msg("Failed to load NZB to mark file as deleted")
 		return
 	}
-	for i := range nzb.Files {
+	// Last match, the same file getFile streams when an older NZB holds
+	// duplicate names.
+	for i := len(nzb.Files) - 1; i >= 0; i-- {
 		if nzb.Files[i].Name == filename {
 			nzb.Files[i].IsDeleted = true
 			if err := u.nzbStorage.AddNZB(nzb); err != nil {
@@ -774,14 +816,55 @@ func (u *Usenet) IsFilePermanentlyFailed(nzoID, filename string) error {
 	if err != nil {
 		return nil
 	}
-	for _, f := range nzb.Files {
-		if f.Name == filename && f.IsDeleted {
+	// Last match, the file getFile streams when an older NZB holds duplicate
+	// names; another same-named file being deleted says nothing about it.
+	for i := len(nzb.Files) - 1; i >= 0; i-- {
+		f := nzb.Files[i]
+		if f.Name != filename {
+			continue
+		}
+		if f.IsDeleted {
 			permanentErr := fmt.Errorf("file %s is permanently unavailable on Usenet", filename)
 			u.failedFiles.Store(key, permanentErr)
 			return customerror.NewArticleNotFoundError(permanentErr)
 		}
+		break
 	}
 	return nil
+}
+
+// ClearFileFailures forgets every permanent-failure mark on an NZB's files:
+// the in-memory flag, the persisted IsDeleted, and any cached re-measure
+// answer. The next read tests each file again, and a file whose articles
+// really are gone is marked again by that read. Used by a manual recheck, so
+// marks written by older builds (a short segment from an estimated layout
+// counted as a missing article) can be undone. Returns how many files were
+// marked.
+func (u *Usenet) ClearFileFailures(nzoID string) (int, error) {
+	nzb, err := u.nzbStorage.GetNZB(nzoID)
+	if err != nil {
+		return 0, err
+	}
+	cleared := 0
+	for i := range nzb.Files {
+		key := fsKey(nzoID, nzb.Files[i].Name)
+		_, inMemory := u.failedFiles.LoadAndDelete(key)
+		u.relayoutAttempts.Delete(key)
+		if nzb.Files[i].IsDeleted || inMemory {
+			cleared++
+			u.retireEntry(key)
+		}
+		nzb.Files[i].IsDeleted = false
+	}
+	if cleared == 0 {
+		return 0, nil
+	}
+	if err := u.nzbStorage.AddNZB(nzb); err != nil {
+		return 0, fmt.Errorf("saving cleared file status: %w", err)
+	}
+	u.logger.Info().Str("nzo_id", nzoID).Str("name", nzb.Name).Int("files", cleared).
+		Msg("Cleared permanent-failure marks for a recheck")
+	return cleared, nil
 }
 
 func (u *Usenet) getFiles(nzoID string, filenames []string) (map[string]*storage.NZBFile, error) {
@@ -795,13 +878,20 @@ func (u *Usenet) getFiles(nzoID string, filenames []string) (map[string]*storage
 		requested[filename] = struct{}{}
 	}
 
+	// Each name resolves to its last file, as in getFile, so duplicate names in
+	// an older NZB give the same file on every path; a deleted one is skipped.
 	files := make(map[string]*storage.NZBFile, len(requested))
-	for i := range nzb.Files {
+	resolved := make(map[string]struct{}, len(requested))
+	for i := len(nzb.Files) - 1; i >= 0; i-- {
 		source := nzb.Files[i]
-		if source.IsDeleted {
+		if _, ok := requested[source.Name]; !ok {
 			continue
 		}
-		if _, ok := requested[source.Name]; !ok {
+		if _, done := resolved[source.Name]; done {
+			continue
+		}
+		resolved[source.Name] = struct{}{}
+		if source.IsDeleted {
 			continue
 		}
 		file := source
@@ -827,6 +917,42 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 	return nil
 }
 
+// Prime reads the byte at start before an HTTP handler commits a successful
+// response. Opening a usenet file performs no NNTP I/O, so without this a
+// missing article only surfaced after "206 Partial Content" headers were sent
+// and the client saw a truncated body it would retry. The segment lands in the
+// reader's cache, so the stream that follows doesn't download it again.
+func (u *Usenet) Prime(ctx context.Context, nzoID, filename string, start int64) error {
+	ctx = nntp.WithWorkClass(ctx, nntp.WorkClassStream)
+	ufsEntry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	if err != nil {
+		return fmt.Errorf("failed to get or create file system: %w", err)
+	}
+	defer u.releaseEntry(ufsEntry)
+
+	readerAt, _, err := ufsEntry.getOrCreateReader()
+	if err != nil {
+		return fmt.Errorf("failed to get reader: %w", err)
+	}
+	var probe [1]byte
+	_, err = readerAt.ReadAtContext(ctx, probe[:], max(start, 0))
+	if err == nil || errors.Is(err, io.EOF) {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if nntp.IsLayoutMismatchError(err) {
+		return u.handleLayoutMismatch(ctx, key, nzoID, filename, err)
+	}
+	if nntp.IsArticleNotFoundError(err) {
+		u.failedFiles.Store(key, err)
+		u.markNZBFileDeleted(nzoID, filename)
+		return customerror.NewArticleNotFoundError(err)
+	}
+	return err
+}
+
 // Stream streams a file using the new streaming system with caching and worker limiting
 func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer) error {
 	ctx = nntp.WithWorkClass(ctx, nntp.WorkClassStream)
@@ -843,7 +969,7 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	if err != nil {
 		return fmt.Errorf("failed to get or create file system: %w", err)
 	}
-	defer u.releaseFS(key)
+	defer u.releaseEntry(ufsEntry)
 
 	// Use start/end directly - file segments are already positioned correctly
 	rangeStart := start
@@ -900,6 +1026,11 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	// Handle context cancellation explicitly
 	if err != nil && ctx.Err() != nil {
 		return ctx.Err()
+	}
+
+	// A short segment: re-measure the layout before deciding anything.
+	if err != nil && nntp.IsLayoutMismatchError(err) {
+		return u.handleLayoutMismatch(ctx, key, nzoID, filename, err)
 	}
 
 	// Mark file as failed if article not found (permanent error)
@@ -1004,11 +1135,11 @@ func (u *Usenet) Touch(ctx context.Context, nzoID, filename string) error {
 // Uses the shared entry/reader so the cache is available for Stream calls.
 func (u *Usenet) PreCache(ctx context.Context, nzoID, filename string) error {
 	// Use shared entry (same as Stream)
-	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	entry, _, err := u.getOrCreateEntry(ctx, nzoID, filename)
 	if err != nil {
 		return fmt.Errorf("failed to get or create entry: %w", err)
 	}
-	defer u.releaseFS(key)
+	defer u.releaseEntry(entry)
 
 	if len(entry.volumes) == 0 {
 		return fmt.Errorf("no volumes available for file %s", filename)
@@ -1350,4 +1481,3 @@ func (u *Usenet) EffectiveProcessingMaxConnections() int {
 	}
 	return u.nntp.EffectiveProcessingMaxConnections(u.processingMaxConnections)
 }
-

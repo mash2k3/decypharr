@@ -36,10 +36,19 @@ type FS struct {
 	maxConcurrent int          // Max concurrent connections per reader
 	prefetchSize  int64        // Prefetch size in bytes
 	logger        zerolog.Logger
+	onShortTail   func()       // See reader.Config.OnShortTail
 }
 
 // Option configures the filesystem
 type Option func(*FS)
+
+// WithShortTailHook is called when a reader finds the file's final segment
+// shorter than its slot (see reader.Config.OnShortTail).
+func WithShortTailHook(fn func()) Option {
+	return func(f *FS) {
+		f.onShortTail = fn
+	}
+}
 
 // NewFS creates a new filesystem backed by the provided connection nntpClient.
 // prefetchSize is the amount of data to prefetch ahead in bytes (e.g., 16*1024*1024 for 16MB)
@@ -231,6 +240,17 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 	}
 	readerConfig.DiskPath = cfg.Usenet.DiskBufferPath
 
+	opts := []reader.Option{
+		reader.WithMaxDisk(readerConfig.MaxDisk),
+		reader.WithMaxConnections(readerConfig.MaxConnections),
+		reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
+		reader.WithDiskPath(readerConfig.DiskPath),
+		reader.WithLogger(f.logger),
+	}
+	if f.onShortTail != nil {
+		opts = append(opts, reader.WithShortTailHook(f.onShortTail))
+	}
+
 	// Create the new streaming reader
 	var streamReader *reader.StreamingReader
 	var err error
@@ -241,22 +261,14 @@ func (f *FS) createNewReaderForVolume(vol *types.Volume) (PrefetchableReaderAt, 
 			f.client,
 			segments,
 			encConfig,
-			reader.WithMaxDisk(readerConfig.MaxDisk),
-			reader.WithMaxConnections(readerConfig.MaxConnections),
-			reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
-			reader.WithDiskPath(readerConfig.DiskPath),
-			reader.WithLogger(f.logger),
+			opts...,
 		)
 	} else {
 		streamReader, err = reader.NewStreamingReader(
 			f.ctx,
 			f.client,
 			segments,
-			reader.WithMaxDisk(readerConfig.MaxDisk),
-			reader.WithMaxConnections(readerConfig.MaxConnections),
-			reader.WithPrefetchAhead(readerConfig.PrefetchAhead),
-			reader.WithDiskPath(readerConfig.DiskPath),
-			reader.WithLogger(f.logger),
+			opts...,
 		)
 	}
 

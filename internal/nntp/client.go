@@ -139,6 +139,10 @@ type TimeoutConfig struct {
 	StreamBodyTimeout time.Duration
 	// Deadline for lightweight health checks (DATE)
 	PingTimeout time.Duration
+	// Deadline for the reaper's background keepalive DATE pings (default 5s).
+	// Longer than PingTimeout: pings queued behind bulk BODY transfers on a
+	// busy link must not be mistaken for dead connections.
+	KeepalivePingTimeout time.Duration
 	// Health check connections idle longer than this
 	StaleThreshold time.Duration
 	// Close connections idle longer than this
@@ -188,6 +192,9 @@ func normalizeTimeouts(in TimeoutConfig) TimeoutConfig {
 	}
 	if in.PingTimeout <= 0 {
 		in.PingTimeout = 1500 * time.Millisecond
+	}
+	if in.KeepalivePingTimeout <= 0 {
+		in.KeepalivePingTimeout = 5 * time.Second
 	}
 	if in.IdleTimeout <= 0 {
 		in.IdleTimeout = 5 * time.Minute
@@ -369,7 +376,7 @@ func (c *Client) isHealthy(entry *connectionEntry) bool {
 	// A successful reaper keepalive counts as activity, so freshly-pinged
 	// connections skip the extra checkout round-trip.
 	if time.Since(entry.lastActivity()) > c.staleThreshold {
-		if err := entry.conn.ping(); err != nil {
+		if err := entry.conn.ping(0); err != nil {
 			return false
 		}
 	}
@@ -461,8 +468,9 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 						currentProvider = newProvider
 						return execErr // Retriable
 
-					case ErrorTypeArticleNotFound:
-						// Article not found - not retriable, try next provider
+					case ErrorTypeArticleNotFound, ErrorTypeArticleMismatch:
+						// Article not found, or a different article under
+						// this Message-ID - not retriable, try next provider
 						return retry.Unrecoverable(execErr)
 
 					default:
@@ -504,6 +512,10 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 			switch nntpErr.Type {
 			case ErrorTypeArticleNotFound:
 				excludeForArticleNotFound(&exclusions, connProvider)
+			case ErrorTypeArticleMismatch:
+				// Only this host: providers sharing a backbone have been
+				// seen to disagree on what a Message-ID holds.
+				exclusions.excludeHost(connProvider.Host)
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
 				exclusions.excludeHost(connProvider.Host)
 			default:
@@ -1034,6 +1046,10 @@ func (c *Client) warmProviderPool(pp *ProviderPool) {
 	}
 }
 
+// deadPathTimeouts is how many keepalive timeouts in a row, with no live
+// reply in between, mark the provider path as down for one reaper sweep.
+const deadPathTimeouts = 2
+
 func (c *Client) reapIdleConnections() {
 	now := utils.Now()
 	for _, pp := range c.pools {
@@ -1076,8 +1092,33 @@ func (c *Client) reapIdleConnections() {
 		}
 		// Ping outside the pool lock — a DATE round-trip per connection must
 		// not block checkouts.
-		for _, entry := range toPing {
-			c.keepAlive(pp, entry, now)
+		anyAlive := false
+		timeouts := 0
+		for i, entry := range toPing {
+			err := c.keepAlive(pp, entry, now)
+			if err == nil {
+				anyAlive = true
+				continue
+			}
+			if !isTimeoutLike(err) {
+				continue
+			}
+			timeouts++
+			// Two timeouts before any connection answered mean the path to
+			// the provider is down: pinging the rest one by one would stall
+			// the reaper KeepalivePingTimeout each, so close the rest of this
+			// batch unpinged (all idle past pingInterval). One timeout is
+			// just as likely a single session NAT dropped silently. Recently
+			// used idle connections were never taken for pinging and stay.
+			if !anyAlive && timeouts >= deadPathTimeouts {
+				for _, rest := range toPing[i+1:] {
+					c.discardPinging(pp, rest)
+				}
+				c.logger.Warn().Err(err).Str("provider", entry.provider.Host).
+					Int("skipped", len(toPing)-i-1).
+					Msg("keepalive pings timed out with no live replies; closing the rest of the stale batch")
+				break
+			}
 		}
 	}
 }
@@ -1086,31 +1127,34 @@ func (c *Client) reapIdleConnections() {
 // slot held) and returns it on success. Failed pings close the connection —
 // exactly the sessions the old aggressive idle timeout existed to avoid
 // handing out, caught here without sacrificing the warm pool.
-func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Time) {
-	discard := func() {
-		conn := entry.conn
-		releaseConnectionEntry(entry)
-		_ = conn.Close()
-		<-pp.slots // Release slot
-	}
-
-	if err := entry.conn.ping(); err != nil {
+func (c *Client) keepAlive(pp *ProviderPool, entry *connectionEntry, now time.Time) error {
+	if err := entry.conn.ping(timeouts.KeepalivePingTimeout); err != nil {
 		c.logger.Debug().Err(err).Str("provider", entry.provider.Host).
 			Msg("keepalive ping failed, closing idle connection")
-		discard()
-		return
+		c.discardPinging(pp, entry)
+		return err
 	}
 	entry.lastPing = now
 
 	pp.mu.Lock()
 	if c.closed.Load() || len(pp.conns) >= pp.max {
 		pp.mu.Unlock()
-		discard()
-		return
+		c.discardPinging(pp, entry)
+		return nil
 	}
 	pp.conns = append(pp.conns, entry)
 	pp.mu.Unlock()
 	<-pp.slots // Release slot - connection is available again
+	return nil
+}
+
+// discardPinging closes an entry taken out of the pool for a keepalive ping
+// and releases the slot it holds.
+func (c *Client) discardPinging(pp *ProviderPool, entry *connectionEntry) {
+	conn := entry.conn
+	releaseConnectionEntry(entry)
+	_ = conn.Close()
+	<-pp.slots // Release slot
 }
 
 // Stats returns current pool statistics
@@ -1671,7 +1715,7 @@ func (c *Client) SpeedTest(ctx context.Context, providerHost string, messageIDs 
 
 	// Measure latency using ping (true network RTT)
 	pingStart := utils.Now()
-	if err := conn.ping(); err != nil {
+	if err := conn.ping(0); err != nil {
 		message := sanitizeProviderError(err, *targetProvider)
 		if strings.Contains(strings.ToLower(message), "unexpected date response") {
 			// DATE is optional on some otherwise usable providers. Use the full

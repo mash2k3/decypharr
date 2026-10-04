@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -95,5 +96,78 @@ func TestPrewarmMissCanRetry(t *testing.T) {
 	seen.forget("episode")
 	if !seen.markIfNew("episode") {
 		t.Fatal("attempt remained suppressed after a miss was forgotten")
+	}
+}
+
+// ParseTorrentName drops numeric show titles entirely ("24.S02E01..." ->
+// title ""), so episodes of "24" never matched Plex's show title.
+func TestNumericShowTitleMatches(t *testing.T) {
+	if got := titleBeforeEpisodeMarker("24.S02E01.1080p.BluRay.x264-SHORTBREHD.mkv"); got != "24" {
+		t.Fatalf("titleBeforeEpisodeMarker = %q, want 24", got)
+	}
+	if got := titleBeforeEpisodeMarker("S02E01.mkv"); got != "" {
+		t.Fatalf("no title before marker should give empty, got %q", got)
+	}
+	file := utils.ParseTorrentName("24.S02E01.1080p.BluRay.x264-SHORTBREHD.mkv")
+	if file.Title != "" {
+		t.Skipf("parser now keeps the title (%q); fallback not needed", file.Title)
+	}
+	want := normalizeEpisodeTitle("24")
+	if matchesEpisodeIdentity(want, 2, 1, utils.ParsedName{}, file) {
+		t.Fatal("expected the raw parse to miss (documents the bug)")
+	}
+	file.Title = titleBeforeEpisodeMarker("24.S02E01.1080p.BluRay.x264-SHORTBREHD.mkv")
+	if !matchesEpisodeIdentity(want, 2, 1, utils.ParsedName{}, file) {
+		t.Fatal("with the fallback title, 24 S02E01 should match")
+	}
+}
+
+// Plex reports the symlink path; when it is readable here, its target (the
+// exact <entry>/<file> in the mount) is tried first.
+func TestPlexPathCandidatesFollowsSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := dir + "/mnt/__all__/24.S02.1080p.BluRay.x264-SHORTBREHD/24.S02E01.mkv"
+	link := dir + "/library/24 (2001) - S02E01 - (24.S02E01.1080p.BluRay.x264-SHORTBREHD).mkv"
+	if err := os.MkdirAll(dir+"/library", 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	got := plexPathCandidates(link)
+	if len(got) != 2 || got[0].path != target || !got[0].isSymlinkTarget || got[1].path != link || got[1].isSymlinkTarget {
+		t.Fatalf("candidates = %v, want [target, link]", got)
+	}
+	if got := plexPathCandidates(dir + "/not-a-link.mkv"); len(got) != 1 {
+		t.Fatalf("plain path: %v", got)
+	}
+}
+
+type fakeMountChild struct {
+	name string
+	dir  bool
+	size int64
+}
+
+func (f fakeMountChild) Name() string { return f.name }
+func (f fakeMountChild) IsDir() bool  { return f.dir }
+func (f fakeMountChild) Size() int64  { return f.size }
+
+func TestPickMountChild(t *testing.T) {
+	const big = 2 * minPlausibleEpisodeSize
+	single := []mountChild{fakeMountChild{name: "obf123.mkv", size: big}, fakeMountChild{name: "a.nfo", size: 10}}
+	withSeasonDir := []mountChild{fakeMountChild{name: "Season 01", dir: true}, fakeMountChild{name: "featurette.mkv", size: big}}
+
+	if got := pickMountChild(single, "OBF123.MKV", false); got != 0 {
+		t.Fatalf("exact name (case-insensitive) = %d, want 0", got)
+	}
+	if got := pickMountChild(single, "Show - S01E02 (Release.mkv).mkv", true); got != 0 {
+		t.Fatalf("symlink target with renamed file should use the single video, got %d", got)
+	}
+	if got := pickMountChild(single, "Show - S01E02.mkv", false); got != -1 {
+		t.Fatalf("a Plex library path must not guess the single video, got %d", got)
+	}
+	if got := pickMountChild(withSeasonDir, "Show - S01E02.mkv", true); got != -1 {
+		t.Fatalf("an entry with a season folder must not pick its top-level extra, got %d", got)
 	}
 }

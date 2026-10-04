@@ -100,6 +100,30 @@ func determineExtension(group *FileGroup) string {
 	return ""
 }
 
+// ownFileMeta returns the yEnc sizes fetched for this specific file, when they
+// are complete and the file's metadata key is unique in the group (obfuscated
+// NZBs can give every file the same number, which would mix up keyed lookups).
+func ownFileMeta(group *FileGroup, file nzbparser.NzbFile) (filePartMeta, bool) {
+	key := fileMetaKey(file)
+	if key == "" || group.fileMeta == nil {
+		return filePartMeta{}, false
+	}
+	meta, ok := group.fileMeta[key]
+	if !ok || meta.segmentSize <= 0 || meta.fileSize <= 0 {
+		return filePartMeta{}, false
+	}
+	same := 0
+	for _, f := range group.Files {
+		if fileMetaKey(f) == key {
+			same++
+		}
+	}
+	if same != 1 {
+		return filePartMeta{}, false
+	}
+	return meta, true
+}
+
 func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64, []storage.NZBSegment) {
 	if len(file.Segments) == 0 {
 		return 0, nil
@@ -137,6 +161,15 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 	if index == len(group.Files)-1 {
 		fileSize = metadata.lastFileSize
 	}
+	// Prefer this file's own yEnc sizes over the group-wide ones (taken from the
+	// first file, or estimated): a part posted with a different segment size
+	// otherwise gets slots that don't match its articles, and reads past an
+	// article's real end fail.
+	segmentSize := metadata.segmentSize
+	if own, ok := ownFileMeta(group, file); ok {
+		segmentSize = own.segmentSize
+		fileSize = own.fileSize
+	}
 
 	for idx, segment := range file.Segments {
 		// A segment without a message id can never be fetched; it would also
@@ -144,24 +177,24 @@ func getNZBSegments(index int, file nzbparser.NzbFile, group *FileGroup) (int64,
 		if segment.Id == "" {
 			return 0, nil
 		}
-		segSize := metadata.segmentSize
+		segSize := segmentSize
 		if idx == len(file.Segments)-1 {
 			// Last segment may be smaller
 			// Last segment calculation
 			// Check if the file size metadata assumes a different file (e.g. mixed groups)
 			// Expected total size if all segments were full
-			fullSegsSize := metadata.segmentSize * int64(len(file.Segments)-1) // size of all previous segments
+			fullSegsSize := segmentSize * int64(len(file.Segments)-1) // size of all previous segments
 
 			// If fileSize is inconsistent with the number of segments (too small or too large),
 			// fallback to estimation for this last segment.
 			// Threshold: if difference > 1.5 segments
 			isSizeMismatch := false
-			expectedTotal := fullSegsSize + metadata.segmentSize // rough estimate
+			expectedTotal := fullSegsSize + segmentSize // rough estimate
 			diff := fileSize - expectedTotal
 			if diff < 0 {
 				diff = -diff
 			}
-			if diff > (metadata.segmentSize*3)/2 {
+			if diff > (segmentSize*3)/2 {
 				isSizeMismatch = true
 			}
 
