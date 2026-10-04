@@ -89,10 +89,16 @@ func (fh *Handle) Read(ctx context.Context, dest []byte, off int64) (fuse.ReadRe
 			if fh.file.vfs != nil {
 				if mgr := fh.file.vfs.Manager(); mgr != nil {
 					info := fh.info
-					if !nntp.IsPoolCapacityError(err) {
-						mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
-					} else {
+					switch {
+					case nntp.IsPoolCapacityError(err):
 						fh.logger.Warn().Err(err).Str("file", info.Name()).Msg("Read failed due to NNTP pool contention; not marking broken")
+					case nntp.IsLayoutMismatchError(err):
+						// A short segment under a layout that couldn't be re-measured, or one
+						// just fixed (the retry reads the new layout). The usenet layer marks
+						// the file failed itself when the data is proven gone.
+						fh.logger.Warn().Err(err).Str("file", info.Name()).Msg("Read hit a file layout mismatch; not marking broken")
+					default:
+						mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
 					}
 				}
 			}

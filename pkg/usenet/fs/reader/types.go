@@ -128,6 +128,11 @@ type Config struct {
 	// level is Debug rather than Disabled), so callers must go through
 	// DefaultConfig/WithLogger rather than constructing a Config directly.
 	Logger zerolog.Logger
+
+	// OnShortTail is called (at most once per reader) when the file's final
+	// segment decodes shorter than its slot, so the owner can re-measure the
+	// layout. The read itself is served with zeros past the segment's data.
+	OnShortTail func()
 }
 
 // DefaultConfig returns a ReaderConfig with sensible defaults.
@@ -215,6 +220,13 @@ func WithDownloadTimeout(d time.Duration) Option {
 func WithLogger(logger zerolog.Logger) Option {
 	return func(c *Config) {
 		c.Logger = logger
+	}
+}
+
+// WithShortTailHook sets Config.OnShortTail.
+func WithShortTailHook(fn func()) Option {
+	return func(c *Config) {
+		c.OnShortTail = fn
 	}
 }
 

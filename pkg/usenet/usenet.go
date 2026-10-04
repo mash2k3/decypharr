@@ -25,6 +25,7 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/usenet/fs"
 	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 	"github.com/sirrobot01/decypharr/pkg/usenet/types"
+	"golang.org/x/sync/singleflight"
 )
 
 const (
@@ -67,6 +68,9 @@ type fsEntry struct {
 	readerErr     error                   // Error from reader creation (if any)
 	refCount      atomic.Int32
 	lastAccessed  atomic.Int64 // Unix timestamp
+	// retired: removed from the map after its file's layout changed. Streams
+	// still holding it finish on the old layout; the last release closes it.
+	retired atomic.Bool
 }
 
 // fsEntryTombstone marks an entry claimed for teardown. Once refCount holds
@@ -226,6 +230,18 @@ type Usenet struct {
 	onStreamBytes func(nzoID, filename string, n int64, probe bool)
 
 	fs *xsync.Map[string, *fsEntry]
+
+	// Layout re-measure (relayout.go).
+	relayoutSG       singleflight.Group
+	relayoutAttempts sync.Map // fsKey -> relayoutAttempt
+	onLayoutFixed    func(nzb *storage.NZB)
+	headerFetcher    func(ctx context.Context, messageID string) (*nntp.YencMetadata, error) // tests only
+}
+
+// SetLayoutFixedHook is called after a file's layout was re-measured and
+// saved, so the manager can update the entry's file sizes.
+func (u *Usenet) SetLayoutFixedHook(fn func(nzb *storage.NZB)) {
+	u.onLayoutFixed = fn
 }
 
 // fsKey builds a cache key for fs map entries efficiently.
@@ -319,7 +335,9 @@ func (u *Usenet) createEntry(file *storage.NZBFile) (*fsEntry, error) {
 
 	fsCtx := context.Background()
 
-	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger)
+	nzoID, name := file.NzbID, file.Name
+	usenetFS, err := fs.NewFS(fsCtx, u.nntp, u.maxConnections, u.prefetchSize, volumes, u.logger,
+		fs.WithShortTailHook(func() { u.relayoutTail(nzoID, name) }))
 	if err != nil {
 		return nil, fmt.Errorf("failed to create usenet FS: %w", err)
 	}
@@ -384,15 +402,31 @@ func (u *Usenet) getOrCreateEntry(ctx context.Context, nzoID, filename string) (
 	}
 }
 
-// releaseFS releases an fs entry using a pre-computed key (avoids redundant allocation).
-func (u *Usenet) releaseFS(key string) {
-	entry, ok := u.fs.Load(key)
+// releaseEntry drops a reference taken by getOrCreateEntry. It releases the
+// entry itself rather than whatever the map now holds under its key: a
+// retired entry has been replaced there, and the last release closes it.
+func (u *Usenet) releaseEntry(entry *fsEntry) {
+	if entry == nil {
+		return
+	}
+	entry.refCount.Add(-1)
+	entry.lastAccessed.Store(utils.NowUnix())
+	if entry.retired.Load() && entry.claimForCleanup() {
+		entry.cleanup()
+	}
+}
+
+// retireEntry removes key's entry from the map so the next stream builds one
+// from the current layout, and closes it now if no stream holds it.
+func (u *Usenet) retireEntry(key string) {
+	entry, ok := u.fs.LoadAndDelete(key)
 	if !ok {
 		return
 	}
-
-	entry.refCount.Add(-1)
-	entry.lastAccessed.Store(utils.NowUnix())
+	entry.retired.Store(true)
+	if entry.claimForCleanup() {
+		entry.cleanup()
+	}
 }
 
 // cleanupIdleFS removes sessions with refCount=0 that haven't been used recently
@@ -860,7 +894,7 @@ func (u *Usenet) Prime(ctx context.Context, nzoID, filename string, start int64)
 	if err != nil {
 		return fmt.Errorf("failed to get or create file system: %w", err)
 	}
-	defer u.releaseFS(key)
+	defer u.releaseEntry(ufsEntry)
 
 	readerAt, _, err := ufsEntry.getOrCreateReader()
 	if err != nil {
@@ -873,6 +907,9 @@ func (u *Usenet) Prime(ctx context.Context, nzoID, filename string, start int64)
 	}
 	if ctx.Err() != nil {
 		return ctx.Err()
+	}
+	if nntp.IsLayoutMismatchError(err) {
+		return u.handleLayoutMismatch(ctx, key, nzoID, filename, err)
 	}
 	if nntp.IsArticleNotFoundError(err) {
 		u.failedFiles.Store(key, err)
@@ -898,7 +935,7 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	if err != nil {
 		return fmt.Errorf("failed to get or create file system: %w", err)
 	}
-	defer u.releaseFS(key)
+	defer u.releaseEntry(ufsEntry)
 
 	// Use start/end directly - file segments are already positioned correctly
 	rangeStart := start
@@ -955,6 +992,11 @@ func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end 
 	// Handle context cancellation explicitly
 	if err != nil && ctx.Err() != nil {
 		return ctx.Err()
+	}
+
+	// A short segment: re-measure the layout before deciding anything.
+	if err != nil && nntp.IsLayoutMismatchError(err) {
+		return u.handleLayoutMismatch(ctx, key, nzoID, filename, err)
 	}
 
 	// Mark file as failed if article not found (permanent error)
@@ -1059,11 +1101,11 @@ func (u *Usenet) Touch(ctx context.Context, nzoID, filename string) error {
 // Uses the shared entry/reader so the cache is available for Stream calls.
 func (u *Usenet) PreCache(ctx context.Context, nzoID, filename string) error {
 	// Use shared entry (same as Stream)
-	entry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	entry, _, err := u.getOrCreateEntry(ctx, nzoID, filename)
 	if err != nil {
 		return fmt.Errorf("failed to get or create entry: %w", err)
 	}
-	defer u.releaseFS(key)
+	defer u.releaseEntry(entry)
 
 	if len(entry.volumes) == 0 {
 		return fmt.Errorf("no volumes available for file %s", filename)

@@ -253,6 +253,11 @@ func (m *Manager) initUsenet() {
 		return
 	}
 	m.usenet = usenetClient
+	// A file whose layout was re-measured from yEnc headers may have a new
+	// size; keep the entry's listing in step.
+	m.usenet.SetLayoutFixedHook(func(nzb *storage.NZB) {
+		m.syncEntryFileSizes(nzb, nzb.TotalSize)
+	})
 	m.startInteractiveMonitor(m.config)
 }
 
