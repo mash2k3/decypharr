@@ -358,6 +358,18 @@ func (sc *SegmentCache) ReadRangeInto(segIdx int, segOffset, length int64, dst [
 	return n, true
 }
 
+// shortSegment reports whether a downloaded segment's decoded data ends before
+// segOffset+length, i.e. the article is smaller than the slot the file layout
+// gives it (estimated or mismatched part sizes). Re-downloading returns the
+// same bytes, so callers must treat it as unreadable rather than retry.
+func (sc *SegmentCache) shortSegment(segIdx int, segOffset, length int64) (stored int64, short bool) {
+	if segIdx < 0 || segIdx >= sc.segCount || SegmentState(sc.states[segIdx].Load()) != StateOnDisk {
+		return 0, false
+	}
+	stored = sc.segLengths[segIdx].Load()
+	return stored, stored > 0 && segOffset+length > stored
+}
+
 // SegmentDataSize returns the stored or expected size of a segment.
 func (sc *SegmentCache) SegmentDataSize(segIdx int) int64 {
 	if segIdx < 0 || segIdx >= sc.segCount {

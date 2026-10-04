@@ -67,6 +67,9 @@ type StreamingReader struct {
 	// never trip the detector; only a genuine jump does.
 	lastEndSeg atomic.Int64
 
+	// fetchSegment overrides fetcher.Fetch for the re-fetch paths (tests only).
+	fetchSegment func(ctx context.Context, segIdx int) error
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -298,6 +301,17 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 		segDataOffset := readStart - segStart
 		copyLen := readEnd - readStart
 
+		// A segment that decoded shorter than its slot can't supply these bytes.
+		// ReadRangeInto would otherwise return a partial copy (leaving a zero
+		// gap in p) or fail into the heal loop, which re-downloads the same
+		// short article 20 times per read while the caller (Plex, rclone)
+		// waits, and then fails without marking the file broken.
+		if _, short := sr.cache.shortSegment(segIdx, segDataOffset, copyLen); short {
+			if err := sr.refetchShortSegment(ctx, segIdx, segDataOffset, copyLen); err != nil {
+				return totalRead, err
+			}
+		}
+
 		// Read only the needed slice directly into the output buffer.
 		// No intermediate scratch buffer — zero extra allocation, zero amplification.
 		n, ok := sr.cache.ReadRangeInto(segIdx, segDataOffset, copyLen, p[outOffset:outOffset+copyLen])
@@ -314,6 +328,35 @@ func (sr *StreamingReader) readFromCache(ctx context.Context, p []byte, off int6
 	}
 
 	return totalRead, nil
+}
+
+func (sr *StreamingReader) refetch(ctx context.Context, segIdx int) error {
+	if sr.fetchSegment != nil {
+		return sr.fetchSegment(ctx, segIdx)
+	}
+	return sr.fetcher.Fetch(ctx, segIdx)
+}
+
+// refetchShortSegment re-downloads a segment once, in case the cached copy was
+// truncated, and returns a permanent article-not-found error if it is still
+// shorter than the read needs. That error makes Usenet.Stream mark the file
+// failed, so later reads fail at once instead of repeating the download.
+func (sr *StreamingReader) refetchShortSegment(ctx context.Context, segIdx int, segDataOffset, copyLen int64) error {
+	sr.cache.invalidateForRefetch(segIdx)
+	if err := sr.refetch(ctx, segIdx); err != nil {
+		return fmt.Errorf("re-fetch segment %d: %w", segIdx, err)
+	}
+	if stored, short := sr.cache.shortSegment(segIdx, segDataOffset, copyLen); short {
+		sr.logger.Warn().Int("segment", segIdx).Int64("stored", stored).
+			Int64("needed", segDataOffset+copyLen).
+			Msg("segment decoded shorter than the file layout expects; data unavailable")
+		return &nntp.Error{
+			Type: nntp.ErrorTypeArticleNotFound,
+			Message: fmt.Sprintf("segment %d decoded to %d bytes, read needs %d",
+				segIdx, stored, segDataOffset+copyLen),
+		}
+	}
+	return nil
 }
 
 // maxSegmentHealAttempts bounds healAndReadSegment's retry loop. Each
@@ -355,8 +398,13 @@ func (sr *StreamingReader) healAndReadSegment(ctx context.Context, segIdx int, s
 		sr.logger.Warn().Int("segment", segIdx).Msg("segment data missing after wait, re-fetching")
 	}
 	for attempt := 0; attempt < maxSegmentHealAttempts; attempt++ {
-		if err := sr.fetcher.Fetch(ctx, segIdx); err != nil {
+		if err := sr.refetch(ctx, segIdx); err != nil {
 			return 0, fmt.Errorf("re-fetch segment %d: %w", segIdx, err)
+		}
+		if _, short := sr.cache.shortSegment(segIdx, segDataOffset, copyLen); short {
+			if err := sr.refetchShortSegment(ctx, segIdx, segDataOffset, copyLen); err != nil {
+				return 0, err
+			}
 		}
 		if n, ok := sr.cache.ReadRangeInto(segIdx, segDataOffset, copyLen, dst); ok {
 			return n, nil
