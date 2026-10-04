@@ -95,6 +95,13 @@ func TestMediaHeaderValid(t *testing.T) {
 		{"mp4 mid-stream", "a.mp4", midStream, false},
 		{"avi ok", "a.avi", []byte("RIFF\x00\x00\x00\x00"), true},
 		{"mpg ok", "a.mpg", []byte{0x00, 0x00, 0x01, 0xBA}, true},
+		{"mp4 fragmented styp", "a.mp4", []byte{0x00, 0x00, 0x00, 0x18, 's', 't', 'y', 'p'}, true},
+		{"mp4 sidx first", "a.m4v", []byte{0x00, 0x00, 0x00, 0x2C, 's', 'i', 'd', 'x'}, true},
+		{"mov uuid box", "a.mov", []byte{0x00, 0x00, 0x00, 0x00, 'u', 'u', 'i', 'd'}, true},
+		{"mp4 64-bit size", "a.mp4", []byte{0x00, 0x00, 0x00, 0x01, 'm', 'd', 'a', 't'}, true},
+		{"mp4 tiny size", "a.mp4", []byte{0x00, 0x00, 0x00, 0x04, 'f', 't', 'y', 'p'}, false},
+		{"mpg holding MPEG-TS", "a.mpg", []byte{0x47, 0x40, 0x00, 0x10, 0x00, 0x00, 0xB0, 0x0D}, true},
+		{"mpeg with zero padding", "a.mpeg", []byte{0, 0, 0, 0, 0, 0, 0, 0}, true},
 		{"unknown extension", "a.ts", midStream, true},
 	}
 	for _, tt := range tests {

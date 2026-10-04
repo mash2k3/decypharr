@@ -3,6 +3,7 @@ package parser
 import (
 	"bytes"
 	"context"
+	"encoding/binary"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -26,19 +27,34 @@ func mediaHeaderValid(name string, head []byte) bool {
 	case ".mkv", ".webm":
 		return bytes.HasPrefix(head, []byte{0x1A, 0x45, 0xDF, 0xA3})
 	case ".mp4", ".m4v", ".mov":
-		if len(head) < 8 {
-			return false
-		}
-		switch string(head[4:8]) {
-		case "ftyp", "moov", "mdat", "free", "skip", "wide", "pnot":
-			return true
-		}
-		return false
+		return isoBoxHeader(head)
 	case ".avi":
 		return bytes.HasPrefix(head, []byte("RIFF"))
-	case ".mpg", ".mpeg":
-		return bytes.HasPrefix(head, []byte{0x00, 0x00, 0x01, 0xBA}) ||
-			bytes.HasPrefix(head, []byte{0x00, 0x00, 0x01, 0xB3})
+	}
+	// Anything else, .mpg/.mpeg included, is accepted: MPEG files may hold a
+	// program stream, a transport stream (0x47 sync) or start with padding,
+	// so their first bytes can't prove the file was stitched wrong.
+	return true
+}
+
+// isoBoxHeader reports whether head starts with a plausible ISO-BMFF box: a
+// 32-bit size (0 = to end of file, 1 = 64-bit size follows, else at least the
+// 8-byte header) and a four-character type. Any box type is accepted, so
+// fragmented and DASH-style files (styp, sidx, moof, uuid) pass as well as
+// ftyp/moov/mdat; mid-stream data almost never has four printable type bytes.
+func isoBoxHeader(head []byte) bool {
+	if len(head) < 8 {
+		return false
+	}
+	size := binary.BigEndian.Uint32(head[:4])
+	if size != 0 && size != 1 && size < 8 {
+		return false
+	}
+	for _, b := range head[4:8] {
+		isAlnum := (b >= 'a' && b <= 'z') || (b >= 'A' && b <= 'Z') || (b >= '0' && b <= '9')
+		if !isAlnum && b != ' ' && b != 0xA9 { // 0xA9: '©' in QuickTime atom names
+			return false
+		}
 	}
 	return true
 }
