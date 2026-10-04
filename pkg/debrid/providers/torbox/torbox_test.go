@@ -41,6 +41,31 @@ func TestDeleteTorrentUsesControlEndpoint(t *testing.T) {
 	}
 }
 
+func TestGetTorrentAcceptsObjectAndArrayResponses(t *testing.T) {
+	tests := map[string]string{
+		"object": `{"success":true,"data":{"id":17,"name":"Release.mkv","size":100,"progress":1,"download_state":"completed","download_finished":true,"created_at":"2026-01-02T03:04:05Z","hash":"ABC","files":[{"id":1,"name":"Release.mkv","absolute_path":"Release.mkv","size":100}]}}`,
+		"array":  `{"success":true,"data":[{"id":17,"name":"Release.mkv","size":100,"progress":1,"download_state":"completed","download_finished":true,"created_at":"2026-01-02T03:04:05Z","hash":"ABC","files":[{"id":1,"name":"Release.mkv","absolute_path":"Release.mkv","size":100}]}]}`,
+	}
+
+	for name, body := range tests {
+		t.Run(name, func(t *testing.T) {
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				w.Header().Set("Content-Type", "application/json")
+				_, _ = fmt.Fprint(w, body)
+			}))
+			t.Cleanup(server.Close)
+
+			torrent, err := testTorbox(server.URL).GetTorrent("17")
+			if err != nil {
+				t.Fatalf("GetTorrent() error = %v", err)
+			}
+			if torrent.Id != "17" || torrent.InfoHash != "ABC" || len(torrent.Files) != 1 {
+				t.Fatalf("GetTorrent() = %#v, want torrent 17 with one file", torrent)
+			}
+		})
+	}
+}
+
 func testTorbox(host string) *Torbox {
 	return &Torbox{
 		Host:   host,
