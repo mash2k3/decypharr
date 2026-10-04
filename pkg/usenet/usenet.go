@@ -725,23 +725,29 @@ func (u *Usenet) getFile(nzoID, filename string) (*storage.NZBFile, error) {
 	if err != nil {
 		return nil, fmt.Errorf("metadata load failed: %w", err)
 	}
+	// NZBs imported before names were made unique can hold two files with the
+	// same name. The manager's entry (keyed by name) lists the LAST one, so
+	// stream that one too; serving the first gave a different size than the
+	// listing and every read past its end failed.
+	var match *storage.NZBFile
 	for i := range nzb.Files {
-		source := nzb.Files[i]
-		if source.Name != filename {
-			continue
+		if nzb.Files[i].Name == filename {
+			match = &nzb.Files[i]
 		}
-		if source.IsDeleted {
-			return nil, customerror.NewArticleNotFoundError(
-				fmt.Errorf("file %s is permanently unavailable on Usenet", filename),
-			)
-		}
-		file := source
-		if file.NzbID == "" {
-			file.NzbID = nzoID
-		}
-		return &file, nil
 	}
-	return nil, fmt.Errorf("file %s not found in NZB %s", filename, nzoID)
+	if match == nil {
+		return nil, fmt.Errorf("file %s not found in NZB %s", filename, nzoID)
+	}
+	if match.IsDeleted {
+		return nil, customerror.NewArticleNotFoundError(
+			fmt.Errorf("file %s is permanently unavailable on Usenet", filename),
+		)
+	}
+	file := *match
+	if file.NzbID == "" {
+		file.NzbID = nzoID
+	}
+	return &file, nil
 }
 
 // markNZBFileDeleted marks a specific NZB file as permanently deleted in storage so the
@@ -752,7 +758,9 @@ func (u *Usenet) markNZBFileDeleted(nzoID, filename string) {
 		u.logger.Warn().Err(err).Str("nzo_id", nzoID).Str("file", filename).Msg("Failed to load NZB to mark file as deleted")
 		return
 	}
-	for i := range nzb.Files {
+	// Last match, the same file getFile streams when an older NZB holds
+	// duplicate names.
+	for i := len(nzb.Files) - 1; i >= 0; i-- {
 		if nzb.Files[i].Name == filename {
 			nzb.Files[i].IsDeleted = true
 			if err := u.nzbStorage.AddNZB(nzb); err != nil {
@@ -1350,4 +1358,3 @@ func (u *Usenet) EffectiveProcessingMaxConnections() int {
 	}
 	return u.nntp.EffectiveProcessingMaxConnections(u.processingMaxConnections)
 }
-

@@ -382,7 +382,39 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 		}
 		return nil, fmt.Errorf("no valid files found in NZB after processing")
 	}
+	if renamed := uniquifyFileNames(nzb.Files); renamed > 0 {
+		p.logger.Warn().Int("renamed", renamed).Str("nzb", nzb.Name).
+			Msg("Files with duplicate names in NZB were renamed so each one is listed and streamed separately")
+	}
 	return nzb, nil
+}
+
+// uniquifyFileNames gives every file in an NZB a distinct name by appending
+// " (2)", " (3)", ... before the extension. The manager keys an entry's files
+// by name (last one wins) while the stream path picked the first match, so two
+// files sharing a name (e.g. a main file and a sample from separate obfuscated
+// RAR sets) were listed with one file's size and streamed from the other.
+func uniquifyFileNames(files []storage.NZBFile) int {
+	seen := make(map[string]struct{}, len(files))
+	renamed := 0
+	for i := range files {
+		name := files[i].Name
+		if _, dup := seen[strings.ToLower(name)]; dup {
+			ext := filepath.Ext(name)
+			base := strings.TrimSuffix(name, ext)
+			for n := 2; ; n++ {
+				candidate := fmt.Sprintf("%s (%d)%s", base, n, ext)
+				if _, taken := seen[strings.ToLower(candidate)]; !taken {
+					name = candidate
+					break
+				}
+			}
+			files[i].Name = name
+			renamed++
+		}
+		seen[strings.ToLower(name)] = struct{}{}
+	}
+	return renamed
 }
 
 func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) map[string]*FileGroup {
