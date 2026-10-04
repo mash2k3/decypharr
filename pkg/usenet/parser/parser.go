@@ -1244,7 +1244,39 @@ func (p *NZBParser) detectFileTypeByContent(ctx context.Context, file nzbparser.
 		}
 	}
 
-	return p.detectFileTypeFromContent(data.Snippet), data.Name, nil
+	fileType := p.detectFileTypeFromContent(data.Snippet)
+	name := data.Name
+	if fileType == storage.NZBFileTypeMedia {
+		// Obfuscated posts often carry no extension at all. processMediaFile
+		// drops a media file it can't find an extension for, so give it the
+		// one its signature implies. Names that already have an extension
+		// (e.g. split parts "x.001") are left alone so they keep grouping.
+		if name == "" {
+			name = file.Filename
+		}
+		if name != "" && filepath.Ext(name) == "" {
+			name += mediaExtensionFromContent(data.Snippet)
+		}
+	}
+	return fileType, name, nil
+}
+
+// mediaExtensionFromContent returns the extension a media signature implies,
+// or "" when the bytes don't identify a specific container.
+func mediaExtensionFromContent(data []byte) string {
+	switch {
+	case len(data) >= 4 && bytes.Equal(data[:4], []byte{0x1A, 0x45, 0xDF, 0xA3}):
+		return ".mkv"
+	case len(data) >= 8 && bytes.Equal(data[4:8], []byte("ftyp")):
+		return ".mp4"
+	case len(data) >= 12 && bytes.Equal(data[:4], []byte("RIFF")) && bytes.Equal(data[8:12], []byte("AVI ")):
+		return ".avi"
+	case len(data) >= 4 && (bytes.Equal(data[:4], []byte{0x00, 0x00, 0x01, 0xBA}) || bytes.Equal(data[:4], []byte{0x00, 0x00, 0x01, 0xB3})):
+		return ".mpg"
+	case len(data) > 188 && data[0] == 0x47 && data[188] == 0x47:
+		return ".ts"
+	}
+	return ""
 }
 
 func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {
