@@ -480,9 +480,16 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 	switch {
 	case errors.Is(err, customerror.UsenetManifestMissingError):
 		// The local segment map is gone; re-probing returns this forever.
-		res.broken = true
-		res.reason = "usenet_manifest_missing"
+		// Unless the entry is being deleted or was only just imported: the
+		// sweep and replacement verification can race either one.
+		res.broken, res.reason = classifyManifestMissing(ctx, r.manifestEntryCreatedAt(entry.InfoHash), time.Now(),
+			func() bool {
+				_, err := r.manager.usenet.NZBStorage().GetNZB(entry.InfoHash)
+				return errors.Is(err, customerror.UsenetManifestMissingError)
+			})
 	case errors.Is(err, customerror.UsenetManifestInvalidError):
+		// Manifests are written to a temp file and renamed, so an undecodable
+		// one is real corruption, never a write in progress.
 		res.broken = true
 		res.reason = "usenet_manifest_invalid"
 	case errors.Is(err, customerror.UsenetSegmentMissingError) || (errors.As(err, &customErr) && customErr.IsPermanent()):
@@ -492,6 +499,52 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 		res.reason = "usenet_probe_error"
 	}
 	return res
+}
+
+// manifestMissingGrace is how long after an entry is created a missing
+// manifest is treated as not written yet rather than lost.
+const manifestMissingGrace = 15 * time.Minute
+
+// manifestRecheckDelay separates the two reads that must both find the
+// manifest missing before it counts as lost.
+var manifestRecheckDelay = 2 * time.Second
+
+// manifestEntryCreatedAt returns when the entry was created, or ok=false when
+// it is no longer in storage (deleted while the sweep held it).
+func (r *Repair) manifestEntryCreatedAt(infoHash string) func() (time.Time, bool) {
+	return func() (time.Time, bool) {
+		current, err := r.manager.storage.Get(infoHash)
+		if err != nil || current == nil {
+			return time.Time{}, false
+		}
+		return current.CreatedAt, true
+	}
+}
+
+// classifyManifestMissing decides whether a missing manifest makes the file
+// broken. It isn't when the entry is gone (a delete raced the probe) or was
+// created within manifestMissingGrace, and the manifest must still be
+// missing on a second read after manifestRecheckDelay.
+func classifyManifestMissing(ctx context.Context, entryCreatedAt func() (time.Time, bool), now time.Time, stillMissing func() bool) (bool, string) {
+	createdAt, exists := entryCreatedAt()
+	if !exists {
+		return false, "entry_removed"
+	}
+	if !createdAt.IsZero() && now.Sub(createdAt) < manifestMissingGrace {
+		return false, "usenet_manifest_pending"
+	}
+	select {
+	case <-ctx.Done():
+		return false, "usenet_probe_error"
+	case <-time.After(manifestRecheckDelay):
+	}
+	if _, exists := entryCreatedAt(); !exists {
+		return false, "entry_removed"
+	}
+	if !stillMissing() {
+		return false, "usenet_manifest_pending"
+	}
+	return true, "usenet_manifest_missing"
 }
 
 func (r *Repair) probeTorrentFile(ctx context.Context, entry *storage.Entry, file *storage.File, name string, res fileResult, opts RepairRunOptions) fileResult {
