@@ -835,6 +835,39 @@ func (u *Usenet) preStreamChecks(file *storage.NZBFile) error {
 	return nil
 }
 
+// Prime reads the byte at start before an HTTP handler commits a successful
+// response. Opening a usenet file performs no NNTP I/O, so without this a
+// missing article only surfaced after "206 Partial Content" headers were sent
+// and the client saw a truncated body it would retry. The segment lands in the
+// reader's cache, so the stream that follows doesn't download it again.
+func (u *Usenet) Prime(ctx context.Context, nzoID, filename string, start int64) error {
+	ctx = nntp.WithWorkClass(ctx, nntp.WorkClassStream)
+	ufsEntry, key, err := u.getOrCreateEntry(ctx, nzoID, filename)
+	if err != nil {
+		return fmt.Errorf("failed to get or create file system: %w", err)
+	}
+	defer u.releaseFS(key)
+
+	readerAt, _, err := ufsEntry.getOrCreateReader()
+	if err != nil {
+		return fmt.Errorf("failed to get reader: %w", err)
+	}
+	var probe [1]byte
+	_, err = readerAt.ReadAtContext(ctx, probe[:], max(start, 0))
+	if err == nil || errors.Is(err, io.EOF) {
+		return nil
+	}
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+	if nntp.IsArticleNotFoundError(err) {
+		u.failedFiles.Store(key, err)
+		u.markNZBFileDeleted(nzoID, filename)
+		return customerror.NewArticleNotFoundError(err)
+	}
+	return err
+}
+
 // Stream streams a file using the new streaming system with caching and worker limiting
 func (u *Usenet) Stream(ctx context.Context, nzoID, filename string, start, end int64, writer io.Writer) error {
 	ctx = nntp.WithWorkClass(ctx, nntp.WorkClassStream)

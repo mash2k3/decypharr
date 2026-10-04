@@ -354,6 +354,12 @@ func (m *Manager) streamUsenet(ctx context.Context, entry *storage.Entry, filena
 
 	// Only build headers if onReady callback is provided (avoids allocations for DFS streaming)
 	if onReady != nil {
+		// Read the first byte before committing headers, so a missing article
+		// becomes an error status instead of a truncated 206 the client retries.
+		if err := m.usenet.Prime(ctx, entry.InfoHash, filename, start); err != nil {
+			return err
+		}
+
 		statusCode := http.StatusOK
 		header := make(http.Header, 4) // Pre-size to avoid rehashing
 		header["Accept-Ranges"] = []string{"bytes"}
