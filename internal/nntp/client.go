@@ -1041,6 +1041,10 @@ func (c *Client) warmProviderPool(pp *ProviderPool) {
 	}
 }
 
+// deadPathTimeouts is how many keepalive timeouts in a row, with no live
+// reply in between, mark the provider path as down for one reaper sweep.
+const deadPathTimeouts = 2
+
 func (c *Client) reapIdleConnections() {
 	now := utils.Now()
 	for _, pp := range c.pools {
@@ -1084,25 +1088,30 @@ func (c *Client) reapIdleConnections() {
 		// Ping outside the pool lock — a DATE round-trip per connection must
 		// not block checkouts.
 		anyAlive := false
+		timeouts := 0
 		for i, entry := range toPing {
 			err := c.keepAlive(pp, entry, now)
 			if err == nil {
 				anyAlive = true
 				continue
 			}
-			// A timeout before any connection answered means the path to the
-			// provider is down, not one wedged session: pinging the rest one
-			// by one would stall the reaper KeepalivePingTimeout each. Close
-			// them unpinged and flush the idle pool. A timeout after a live
-			// reply is a wedged session and leaves the pool alone.
-			if !anyAlive && isTimeoutLike(err) {
+			if !isTimeoutLike(err) {
+				continue
+			}
+			timeouts++
+			// Two timeouts before any connection answered mean the path to
+			// the provider is down: pinging the rest one by one would stall
+			// the reaper KeepalivePingTimeout each, so close the rest of this
+			// batch unpinged (all idle past pingInterval). One timeout is
+			// just as likely a single session NAT dropped silently. Recently
+			// used idle connections were never taken for pinging and stay.
+			if !anyAlive && timeouts >= deadPathTimeouts {
 				for _, rest := range toPing[i+1:] {
 					c.discardPinging(pp, rest)
 				}
-				flushed := c.flushIdle(pp)
 				c.logger.Warn().Err(err).Str("provider", entry.provider.Host).
-					Int("skipped", len(toPing)-i-1).Int("flushed", flushed).
-					Msg("keepalive ping timed out with no live replies; flushing idle connections")
+					Int("skipped", len(toPing)-i-1).
+					Msg("keepalive pings timed out with no live replies; closing the rest of the stale batch")
 				break
 			}
 		}
@@ -1141,21 +1150,6 @@ func (c *Client) discardPinging(pp *ProviderPool, entry *connectionEntry) {
 	releaseConnectionEntry(entry)
 	_ = conn.Close()
 	<-pp.slots // Release slot
-}
-
-// flushIdle closes every idle pooled connection for a provider (idle entries
-// hold no slot) and returns how many were closed.
-func (c *Client) flushIdle(pp *ProviderPool) int {
-	pp.mu.Lock()
-	idle := pp.conns
-	pp.conns = nil
-	pp.mu.Unlock()
-	for _, entry := range idle {
-		conn := entry.conn
-		releaseConnectionEntry(entry)
-		_ = conn.Close()
-	}
-	return len(idle)
 }
 
 // Stats returns current pool statistics

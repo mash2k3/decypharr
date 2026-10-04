@@ -55,27 +55,50 @@ func TestPingWriteHonoursPingBudget(t *testing.T) {
 	}
 }
 
-// With no live replies, the first keepalive timeout means the provider path
-// is down: the rest of the batch is closed unpinged and the idle pool flushed,
-// instead of the reaper waiting out every connection in turn.
-func TestReaperFlushesPoolOnDeadPath(t *testing.T) {
+// With no live replies, two keepalive timeouts in a row mean the provider
+// path is down: the rest of the stale batch is closed unpinged instead of the
+// reaper waiting out every connection in turn. Recently used idle connections
+// (not due a ping) are kept.
+func TestReaperClosesStaleBatchOnDeadPath(t *testing.T) {
 	withKeepaliveTimeout(t, time.Second)
 	pp := newTestPool(8)
 	for i := 0; i < 5; i++ {
 		poolEntry(pp, newSilentPipeConnection(t, true), 40*time.Second)
 	}
+	fresh := newPipeConnection(t, true)
+	poolEntry(pp, fresh, time.Second)
 	c := newReaperTestClient(pp)
 
 	start := time.Now()
 	c.reapIdleConnections()
 	elapsed := time.Since(start)
 
-	// One keepalive budget, not five in a row.
-	if elapsed > 2500*time.Millisecond {
+	// Two keepalive budgets, not five in a row.
+	if elapsed > 3500*time.Millisecond {
 		t.Fatalf("reaper took %s; it pinged every dead connection instead of condemning the path", elapsed)
 	}
-	if n := len(pp.conns); n != 0 {
-		t.Fatalf("pool has %d idle connections, want 0 after flush", n)
+	if len(pp.conns) != 1 || pp.conns[0].conn != fresh {
+		t.Fatalf("want only the recently used connection kept, got %d entries", len(pp.conns))
+	}
+	if n := len(pp.slots); n != 0 {
+		t.Fatalf("%d slots still held, want all released", n)
+	}
+}
+
+// A single timeout is a session NAT dropped, not an outage: the next stale
+// connection still gets pinged and kept when it answers.
+func TestReaperSingleTimeoutKeepsPinging(t *testing.T) {
+	withKeepaliveTimeout(t, time.Second)
+	pp := newTestPool(8)
+	poolEntry(pp, newSilentPipeConnection(t, true), 40*time.Second)
+	healthy := newPipeConnection(t, true)
+	poolEntry(pp, healthy, 40*time.Second)
+	c := newReaperTestClient(pp)
+
+	c.reapIdleConnections()
+
+	if len(pp.conns) != 1 || pp.conns[0].conn != healthy {
+		t.Fatalf("want the healthy connection kept after one timeout, got %d entries", len(pp.conns))
 	}
 	if n := len(pp.slots); n != 0 {
 		t.Fatalf("%d slots still held, want all released", n)
