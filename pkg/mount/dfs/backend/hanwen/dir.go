@@ -4,7 +4,9 @@ package hanwen
 
 import (
 	"context"
+	"path"
 	"syscall"
+	"time"
 
 	"github.com/hanwen/go-fuse/v2/fs"
 	"github.com/hanwen/go-fuse/v2/fuse"
@@ -26,13 +28,16 @@ const (
 // Dir implements a FUSE directory following
 type Dir struct {
 	fs.Inode
-	vfs      *vfs.Manager
-	level    DirLevel
-	name     string
-	config   *config.FuseConfig
-	logger   zerolog.Logger
-	rlLogger *logger.RateLimitedLogger
-	modTime  uint64
+	vfs   *vfs.Manager
+	level DirLevel
+	name  string
+	// virtualPath is the canonical path of this directory within the mount.
+	// It is used to give children stable, namespace-unique inode numbers.
+	virtualPath string
+	config      *config.FuseConfig
+	logger      zerolog.Logger
+	rlLogger    *logger.RateLimitedLogger
+	modTime     uint64
 }
 
 var _ = (fs.NodeLookuper)((*Dir)(nil))
@@ -43,14 +48,30 @@ var _ = (fs.NodeRmdirer)((*Dir)(nil))
 
 // NewDir creates a new directory
 func NewDir(vfsManager *vfs.Manager, name string, level DirLevel, modTime uint64, config *config.FuseConfig, log zerolog.Logger, rl *logger.RateLimitedLogger) *Dir {
+	return newDir(vfsManager, name, path.Join("/", name), level, modTime, config, log, rl)
+}
+
+func newDir(vfsManager *vfs.Manager, name, virtualPath string, level DirLevel, modTime uint64, config *config.FuseConfig, log zerolog.Logger, rl *logger.RateLimitedLogger) *Dir {
 	return &Dir{
-		vfs:      vfsManager,
-		name:     name,
-		level:    level,
-		config:   config,
-		logger:   log.With().Str("dir", name).Logger(),
-		rlLogger: rl,
-		modTime:  modTime,
+		vfs:         vfsManager,
+		name:        name,
+		virtualPath: virtualPath,
+		level:       level,
+		config:      config,
+		logger:      log.With().Str("dir", name).Logger(),
+		rlLogger:    rl,
+		modTime:     modTime,
+	}
+}
+
+func (d *Dir) childPath(name string) string {
+	return path.Join(d.virtualPath, name)
+}
+
+func (d *Dir) childStableAttr(name string, mode uint32) fs.StableAttr {
+	return fs.StableAttr{
+		Mode: mode,
+		Ino:  hashPath(d.childPath(name)),
 	}
 }
 
@@ -63,7 +84,11 @@ func (d *Dir) newNode(info *manager.FileInfo) fs.InodeEmbedder {
 
 	var node fs.InodeEmbedder
 	if info.IsDir() {
-		node = NewDir(d.vfs, info.Name(), d.level+1, uint64(info.ModTime().Unix()), d.config, d.logger, d.rlLogger)
+		modTime := info.ModTime()
+		if modTime.IsZero() {
+			modTime = time.Now()
+		}
+		node = newDir(d.vfs, info.Name(), d.childPath(info.Name()), d.level+1, uint64(modTime.Unix()), d.config, d.logger, d.rlLogger)
 	} else {
 		node = NewFile(d.vfs, d.config, info, d.rlLogger)
 	}
@@ -94,14 +119,58 @@ func (d *Dir) Lookup(ctx context.Context, name string, out *fuse.EntryOut) (*fs.
 		return nil, errno
 	}
 
+	// Stable attributes make go-fuse retain an existing inode. Refresh the
+	// retained file node before returning it so replacements do not continue
+	// serving stale size and stream metadata.
+	if child, file := d.refreshExistingFile(name, info); child != nil {
+		d.setEntryOut(info, out, uint64(file.modTime(info).Unix()))
+		return child, 0
+	}
+
 	// get or create fuse node (cached on FileInfo)
 	node := d.newNode(info)
 
 	// Set attributes
-	d.setEntryOut(info, out)
+	d.setEntryOut(info, out, d.nodeModTime(info, node))
 
-	// Create/get inode - NewInode handles deduplication
-	return d.NewInode(ctx, node, fs.StableAttr{Mode: out.Attr.Mode}), 0
+	// Supplying a stable inode lets NewInode deduplicate repeated lookups.
+	// Leaving Ino unset makes go-fuse allocate a new sequential inode each time.
+	return d.NewInode(ctx, node, d.childStableAttr(name, out.Mode)), 0
+}
+
+func (d *Dir) refreshExistingFile(name string, info *manager.FileInfo) (*fs.Inode, *File) {
+	if info.IsDir() {
+		return nil, nil
+	}
+
+	child := d.GetChild(name)
+	if child == nil {
+		return nil, nil
+	}
+
+	file, ok := child.Operations().(*File)
+	if !ok {
+		return nil, nil
+	}
+
+	file.updateInfo(info)
+	info.SetSys(file)
+	return child, file
+}
+
+func (d *Dir) nodeModTime(info *manager.FileInfo, node fs.InodeEmbedder) uint64 {
+	if modTime := info.ModTime(); !modTime.IsZero() {
+		return uint64(modTime.Unix())
+	}
+
+	switch node := node.(type) {
+	case *File:
+		return uint64(node.createdAt.Unix())
+	case *Dir:
+		return node.modTime
+	default:
+		return 0
+	}
 }
 
 // lookupChild looks up a child by name using O(1) lookups where possible
@@ -140,9 +209,7 @@ func (d *Dir) lookupChild(name string) (*manager.FileInfo, syscall.Errno) {
 }
 
 // setEntryOut sets the attributes for an entry
-func (d *Dir) setEntryOut(info *manager.FileInfo, out *fuse.EntryOut) {
-	modTime := uint64(info.ModTime().Unix())
-
+func (d *Dir) setEntryOut(info *manager.FileInfo, out *fuse.EntryOut, modTime uint64) {
 	if info.IsDir() {
 		out.Attr.Mode = fuse.S_IFDIR | 0755
 		out.Attr.Nlink = 2
@@ -177,7 +244,7 @@ func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		fuseEntries = append(fuseEntries, fuse.DirEntry{
 			Mode: mode,
 			Name: info.Name(),
-			Ino:  hashPath(d.name + "/" + info.Name()),
+			Ino:  d.childStableAttr(info.Name(), mode).Ino,
 		})
 	}
 
