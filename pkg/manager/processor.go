@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -25,6 +26,39 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 		return fmt.Errorf("arr is required")
 	}
 
+	// Adapted from upstream sirrobot01/decypharr c1bc24a: concurrent adds of
+	// the same hash (an Arr/client retrying while the first add is still in
+	// flight) used to both pass and submit twice to the provider. Coalesce
+	// them, and treat an add of a hash already queued as success, as
+	// qBittorrent does. Upstream's extra window that suppresses re-adds after
+	// a delete is deliberately not taken: cli_debrid deletes and re-adds on
+	// purpose during repair.
+	key := torrentSubmissionKey(importReq)
+	if key == "" {
+		return m.addNewTorrent(ctx, importReq)
+	}
+	_, err, _ := m.submitSG.Do(key, func() (any, error) {
+		if _, err := m.queue.GetTorrent(importReq.Magnet.InfoHash); err == nil {
+			return nil, nil
+		}
+		return nil, m.addNewTorrent(ctx, importReq)
+	})
+	return err
+}
+
+func torrentSubmissionKey(req *ImportRequest) string {
+	hash := strings.ToLower(strings.TrimSpace(req.Magnet.InfoHash))
+	if hash == "" {
+		return ""
+	}
+	provider := strings.ToLower(strings.TrimSpace(req.SelectedDebrid))
+	if provider == "" {
+		provider = "auto"
+	}
+	return provider + ":" + hash
+}
+
+func (m *Manager) addNewTorrent(ctx context.Context, importReq *ImportRequest) error {
 	debridTorrent, err := m.SendToDebrid(ctx, importReq)
 	if err != nil {
 		if isTooManyActiveDownloads(err) {

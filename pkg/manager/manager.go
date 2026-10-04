@@ -54,7 +54,9 @@ type Manager struct {
 	queue        *Queue
 
 	// downloading
-	refreshSG   singleflight.Group
+	refreshSG singleflight.Group
+	// submitSG coalesces concurrent submissions of the same torrent.
+	submitSG    singleflight.Group
 	linkService *link.Service
 
 	// repair
