@@ -29,21 +29,37 @@ func (m *Manager) AddNewTorrent(ctx context.Context, importReq *ImportRequest) e
 	// Adapted from upstream sirrobot01/decypharr c1bc24a: concurrent adds of
 	// the same hash (an Arr/client retrying while the first add is still in
 	// flight) used to both pass and submit twice to the provider. Coalesce
-	// them, and treat an add of a hash already queued as success, as
-	// qBittorrent does. Upstream's extra window that suppresses re-adds after
-	// a delete is deliberately not taken: cli_debrid deletes and re-adds on
-	// purpose during repair.
+	// them, and treat an add of a hash already queued and still live as
+	// success, as qBittorrent does. Upstream's extra window that suppresses
+	// re-adds after a delete is deliberately not taken: cli_debrid deletes and
+	// re-adds on purpose during repair.
 	key := torrentSubmissionKey(importReq)
 	if key == "" {
 		return m.addNewTorrent(ctx, importReq)
 	}
 	_, err, _ := m.submitSG.Do(key, func() (any, error) {
-		if _, err := m.queue.GetTorrent(importReq.Magnet.InfoHash); err == nil {
+		if queued, err := m.queue.GetTorrent(importReq.Magnet.InfoHash); err == nil && queuedSatisfiesAdd(queued, importReq) {
 			return nil, nil
 		}
 		return nil, m.addNewTorrent(ctx, importReq)
 	})
 	return err
+}
+
+// queuedSatisfiesAdd reports whether an add can be answered by an entry that
+// is already queued. A failed entry stays in the queue so the Arr can see the
+// error, and a retry of it must submit again rather than report success and
+// do nothing. An add aimed at a different debrid provider is a new
+// submission too.
+func queuedSatisfiesAdd(queued *storage.Entry, req *ImportRequest) bool {
+	if queued == nil || queued.State == storage.EntryStateError {
+		return false
+	}
+	want := strings.TrimSpace(req.SelectedDebrid)
+	if want == "" || queued.ActiveProvider == "" {
+		return true
+	}
+	return strings.EqualFold(want, queued.ActiveProvider)
 }
 
 func torrentSubmissionKey(req *ImportRequest) string {
