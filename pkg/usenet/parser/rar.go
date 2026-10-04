@@ -4,11 +4,13 @@ import (
 	"bytes"
 	"context"
 	"encoding/binary"
+	"errors"
 	"fmt"
 	"io"
 	"path"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/Tensai75/nzbparser"
 	"github.com/rs/zerolog"
@@ -299,6 +301,11 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	return files, nil
 }
 
+const (
+	rarVolumeParseAttempts = 3
+	rarVolumeRetryDelay    = 500 * time.Millisecond
+)
+
 // rarVolumeReorder returns the input indices sorted by real volume number when
 // that order differs from the input order. It returns false when the input is
 // already in order, or when any volume number is unknown or duplicated, since
@@ -380,9 +387,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	}
 
 	// Map function to parse each volume
-	results := mapper.Map(inputs, func(input *volumeInput) volumeResult {
-		volIdx := input.idx
-		vol := input.vol
+	parseVolume := func(volIdx int, vol *types.Volume) volumeResult {
 
 		// Create stream reader for this specific volume
 		stream := newRarReader(ctx, p.manager, []*types.Volume{vol})
@@ -428,6 +433,37 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		}
 
 		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, volumeNumber: volumeNumber, err: nil}
+	}
+
+	results := mapper.Map(inputs, func(input *volumeInput) volumeResult {
+		// A failed segment fetch mid-header makes the stream parsers stop
+		// early without an error, so a volume can come back with no file
+		// entries. Dropping it silently truncates the extracted file and
+		// leaves its volume number unknown, so retry before giving up.
+		var res volumeResult
+		for attempt := 1; attempt <= rarVolumeParseAttempts; attempt++ {
+			res = parseVolume(input.idx, input.vol)
+			if errors.Is(res.err, crypto.ErrBadPassword) || res.isHeaderEncrypted {
+				return res
+			}
+			if res.err == nil && len(res.files) > 0 {
+				return res
+			}
+			if attempt == rarVolumeParseAttempts || ctx.Err() != nil {
+				break
+			}
+			select {
+			case <-ctx.Done():
+			case <-time.After(time.Duration(attempt) * rarVolumeRetryDelay):
+			}
+		}
+		p.logger.Warn().
+			Err(res.err).
+			Str("volume", input.vol.Name).
+			Int("index", input.idx).
+			Int("attempts", rarVolumeParseAttempts).
+			Msg("Failed to read RAR volume headers; volume dropped")
+		return res
 	})
 
 	// Sort results by index to maintain order and collect files

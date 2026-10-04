@@ -917,6 +917,50 @@ func (p *NZBParser) processFileGroup(ctx context.Context, group *FileGroup, pass
 	}
 }
 
+// applyYencRarVolumeNames renames a RAR group's volumes to the filenames from
+// their yEnc headers when the NZB subjects don't say which volume is which
+// (obfuscated uploads use fake "<random>.rar" names and fake [x/y] counters,
+// so the subject order is meaningless) but the yEnc headers do (.partNN.rar,
+// .rNN). It only applies when every volume has a yEnc name and those names
+// give each volume a distinct position, so a partial set never mixes naming
+// schemes. Reports whether it renamed anything.
+func applyYencRarVolumeNames(group *FileGroup, yencNames []string) bool {
+	if len(group.Files) < 2 || len(yencNames) != len(group.Files) {
+		return false
+	}
+	if rarVolumeNamesOrdered(func(i int) string { return group.Files[i].Filename }, len(group.Files)) {
+		return false
+	}
+	if !rarVolumeNamesOrdered(func(i int) string { return yencNames[i] }, len(yencNames)) {
+		return false
+	}
+	for i := range group.Files {
+		group.Files[i].Filename = yencNames[i]
+	}
+	return true
+}
+
+// rarVolumeNamesOrdered reports whether n names each map to a distinct, known
+// RAR volume position.
+func rarVolumeNamesOrdered(name func(int) string, n int) bool {
+	seen := make(map[int]struct{}, n)
+	for i := 0; i < n; i++ {
+		nm := name(i)
+		if nm == "" {
+			return false
+		}
+		order := getRARVolumeOrder(nm)
+		if order == 999999 {
+			return false
+		}
+		if _, dup := seen[order]; dup {
+			return false
+		}
+		seen[order] = struct{}{}
+	}
+	return true
+}
+
 func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGroup) error {
 	if len(group.Files) == 0 {
 		return nil
@@ -933,6 +977,7 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 	type fetchResult struct {
 		index int
 		meta  filePartMeta
+		name  string // filename from the yEnc header
 		err   error
 	}
 
@@ -950,7 +995,7 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 		i := *idx
 		file := group.Files[i]
 		if len(file.Segments) == 0 {
-			return fetchResult{i, filePartMeta{}, fmt.Errorf("no segments in file %d", i)}
+			return fetchResult{index: i, err: fmt.Errorf("no segments in file %d", i)}
 		}
 		var data *nntp.YencMetadata
 		err := p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
@@ -959,7 +1004,7 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 			return e
 		})
 		if err != nil {
-			return fetchResult{i, filePartMeta{}, err}
+			return fetchResult{index: i, err: err}
 		}
 		return fetchResult{
 			index: i,
@@ -967,8 +1012,24 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 				fileSize:    data.Size,
 				segmentSize: data.End - data.Begin + 1,
 			},
+			name: data.Name,
 		}
 	})
+
+	if group.Type == storage.NZBFileTypeRar {
+		yencNames := make([]string, len(group.Files))
+		for _, res := range results {
+			if res.err == nil {
+				yencNames[res.index] = res.name
+			}
+		}
+		if applyYencRarVolumeNames(group, yencNames) {
+			p.logger.Info().
+				Str("group", group.BaseName).
+				Int("volumes", len(group.Files)).
+				Msg("Obfuscated RAR volume names replaced with yEnc header names for volume ordering")
+		}
+	}
 
 	if group.fileMeta == nil {
 		group.fileMeta = make(map[string]filePartMeta)

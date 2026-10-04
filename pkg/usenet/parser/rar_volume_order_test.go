@@ -3,6 +3,8 @@ package parser
 import (
 	"reflect"
 	"testing"
+
+	nzbparser "github.com/Tensai75/nzbparser"
 )
 
 func TestRarVolumeReorder(t *testing.T) {
@@ -102,4 +104,53 @@ func TestMediaHeaderValid(t *testing.T) {
 			}
 		})
 	}
+}
+
+func rarGroup(names ...string) *FileGroup {
+	g := &FileGroup{}
+	for _, n := range names {
+		g.Files = append(g.Files, nzbparser.NzbFile{Filename: n})
+	}
+	return g
+}
+
+func TestApplyYencRarVolumeNames(t *testing.T) {
+	t.Run("obfuscated subjects use yEnc names", func(t *testing.T) {
+		// Real-world: subjects "PHMV2SbI78aIQ7wqt2.rar" etc., yEnc headers
+		// carry the true part numbers.
+		g := rarGroup("PHMV2SbI78aIQ7wqt2.rar", "N5TmvpKn.rar", "Z-vJ2d2U6O85.rar")
+		yenc := []string{"x.part52.rar", "x.part42.rar", "x.part01.rar"}
+		if !applyYencRarVolumeNames(g, yenc) {
+			t.Fatal("expected rename")
+		}
+		for i, f := range g.Files {
+			if f.Filename != yenc[i] {
+				t.Errorf("file %d = %q, want %q", i, f.Filename, yenc[i])
+			}
+		}
+	})
+	t.Run("subjects already ordered", func(t *testing.T) {
+		g := rarGroup("x.part01.rar", "x.part02.rar")
+		if applyYencRarVolumeNames(g, []string{"y.part02.rar", "y.part01.rar"}) {
+			t.Error("should keep subject names that already give an order")
+		}
+	})
+	t.Run("missing yEnc name", func(t *testing.T) {
+		g := rarGroup("a.rar", "b.rar")
+		if applyYencRarVolumeNames(g, []string{"x.part01.rar", ""}) {
+			t.Error("should not rename with a partial set")
+		}
+	})
+	t.Run("yEnc names also obfuscated", func(t *testing.T) {
+		g := rarGroup("a.rar", "b.rar")
+		if applyYencRarVolumeNames(g, []string{"q.rar", "r.rar"}) {
+			t.Error("should not rename when yEnc names give no order either")
+		}
+	})
+	t.Run("old-style rNN names", func(t *testing.T) {
+		g := rarGroup("a.rar", "b.rar", "c.rar")
+		if !applyYencRarVolumeNames(g, []string{"x.r00", "x.rar", "x.r01"}) {
+			t.Error("expected rename for .rar/.rNN set")
+		}
+	})
 }
