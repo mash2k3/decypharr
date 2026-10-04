@@ -10,6 +10,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/Tensai75/nzbparser"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/crypto"
 	"github.com/sirrobot01/decypharr/internal/nntp"
@@ -62,13 +63,16 @@ const (
 	RAR4HeaderTypeService = 0x7A
 	RAR4HeaderTypeEnd     = 0x7B
 
-	RAR4HeaderFlagHasAdd    = 0x0001
-	RAR4HeaderFlagLongBlock = 0x8000
-	RAR4FileFlagDirectory   = 0x00E0
-	RAR4FileFlagSolid       = 0x0010
-	RAR4FileFlagEncrypted   = 0x0004 // File data is encrypted
-	RAR4FileFlagHighSize    = 0x0100 // 64-bit file size (high 4 bytes follow after low 4 bytes)
-	RAR4ArchiveFlagPassword = 0x0080 // Archive headers are encrypted
+	RAR4HeaderFlagHasAdd       = 0x0001
+	RAR4HeaderFlagLongBlock    = 0x8000
+	RAR4FileFlagDirectory      = 0x00E0
+	RAR4FileFlagSolid          = 0x0010
+	RAR4FileFlagEncrypted      = 0x0004 // File data is encrypted
+	RAR4FileFlagHighSize       = 0x0100 // 64-bit file size (high 4 bytes follow after low 4 bytes)
+	RAR4ArchiveFlagPassword    = 0x0080 // Archive headers are encrypted
+	RAR4ArchiveFlagFirstVolume = 0x0100 // First volume of a multi-volume set
+	RAR4EndFlagDataCRC         = 0x0002 // End block carries the archive data CRC
+	RAR4EndFlagVolNumber       = 0x0008 // End block carries the volume number
 
 	RAR4CompressionMethodStore = 0x30
 )
@@ -90,6 +94,9 @@ type RARArchiveInfo struct {
 	IsDataEncrypted   bool   // File data is encrypted
 	EncryptionKey     []byte // AES-256 key derived from password (32 bytes)
 	Files             []*RARFileEntry
+	// VolumeNumbers holds the volume number read from each input volume's
+	// headers, by input index (-1 if unknown).
+	VolumeNumbers []int
 }
 
 // RARFileEntry represents a file within the RAR archive
@@ -164,6 +171,41 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	archiveInfo, err := p.parseArchive(ctx, volumes, password)
 	if err != nil {
 		return nil, fmt.Errorf("failed to parse RAR archive: %w", err)
+	}
+
+	// The sort above is only a guess when filenames are obfuscated: it falls
+	// back to NZB order, which indexers often scramble. Every volume records
+	// its real number in its own headers, so if those disagree with the guess,
+	// put the volumes in true order and parse again. Otherwise the volumes are
+	// stitched out of order and the extracted file is unplayable garbage.
+	order, ok := rarVolumeReorder(archiveInfo.VolumeNumbers)
+	if !ok {
+		p.logger.Debug().
+			Str("group", group.BaseName).
+			Ints("volume_numbers", archiveInfo.VolumeNumbers).
+			Msg("RAR volume order kept")
+	}
+	if ok {
+		p.logger.Warn().
+			Str("group", group.BaseName).
+			Int("volumes", len(order)).
+			Msg("RAR volumes out of order (obfuscated filenames); reordering by volume number from RAR headers")
+
+		reordered := make([]nzbparser.NzbFile, len(order))
+		for i, idx := range order {
+			reordered[i] = group.Files[idx]
+		}
+		group.Files = reordered
+
+		volumes = buildArchiveVolumeDescriptors(group)
+		baseSegments, volumeInfos, _ = buildBaseSegments(group)
+		if len(volumes) == 0 || len(baseSegments) == 0 {
+			return nil, fmt.Errorf("no RAR volumes after reordering")
+		}
+		archiveInfo, err = p.parseArchive(ctx, volumes, password)
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse RAR archive after reordering volumes: %w", err)
+		}
 	}
 
 	// Check if archive has encrypted headers and we couldn't parse it
@@ -257,6 +299,39 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	return files, nil
 }
 
+// rarVolumeReorder returns the input indices sorted by real volume number when
+// that order differs from the input order. It returns false when the input is
+// already in order, or when any volume number is unknown or duplicated, since
+// then there's no trustworthy order to switch to.
+func rarVolumeReorder(volumeNumbers []int) ([]int, bool) {
+	if len(volumeNumbers) < 2 {
+		return nil, false
+	}
+	seen := make(map[int]struct{}, len(volumeNumbers))
+	for _, n := range volumeNumbers {
+		if n < 0 {
+			return nil, false
+		}
+		if _, dup := seen[n]; dup {
+			return nil, false
+		}
+		seen[n] = struct{}{}
+	}
+	order := make([]int, len(volumeNumbers))
+	for i := range order {
+		order[i] = i
+	}
+	sort.Slice(order, func(i, j int) bool {
+		return volumeNumbers[order[i]] < volumeNumbers[order[j]]
+	})
+	for i, idx := range order {
+		if i != idx {
+			return order, true
+		}
+	}
+	return nil, false
+}
+
 // ParseArchive parses all volumes and extracts file information
 func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, password string) (*RARArchiveInfo, error) {
 	if len(volumes) == 0 {
@@ -281,6 +356,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		files             []*RARFileEntry
 		isHeaderEncrypted bool
 		encryptionKey     []byte // AES-256 key for encrypted file data
+		volumeNumber      int    // volume number from the RAR headers, -1 if unknown
 		err               error
 	}
 
@@ -318,12 +394,13 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		}
 		sigBuf := make([]byte, sigSize)
 		if _, err := io.ReadFull(stream, sigBuf); err != nil {
-			return volumeResult{index: volIdx, files: nil, err: err}
+			return volumeResult{index: volIdx, files: nil, volumeNumber: -1, err: err}
 		}
 
 		// Parse this volume's file entries
 		var volumeFiles []*RARFileEntry
 		var isEncrypted bool
+		volumeNumber := -1
 		var err error
 
 		switch version {
@@ -334,22 +411,23 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			} else if result != nil {
 				volumeFiles = result.Files
 				isEncrypted = result.IsHeaderEncrypted
+				volumeNumber = result.VolumeNumber
 				// Store the encryption key from first encrypted volume
 				if len(result.EncryptionKey) > 0 {
-					return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, encryptionKey: result.EncryptionKey, err: nil}
+					return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, encryptionKey: result.EncryptionKey, volumeNumber: volumeNumber, err: nil}
 				}
 			}
 		case RARVersion4:
-			volumeFiles, err = p.parseRAR4Stream(stream, volIdx, vol.Name, vol.Size)
+			volumeFiles, volumeNumber, err = p.parseRAR4Stream(stream, volIdx, vol.Name, vol.Size)
 		default:
 			err = fmt.Errorf("unsupported RAR version: %d", version)
 		}
 
 		if err != nil {
-			return volumeResult{index: volIdx, files: nil, err: err}
+			return volumeResult{index: volIdx, files: nil, volumeNumber: -1, err: err}
 		}
 
-		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, err: nil}
+		return volumeResult{index: volIdx, files: volumeFiles, isHeaderEncrypted: isEncrypted, volumeNumber: volumeNumber, err: nil}
 	})
 
 	// Sort results by index to maintain order and collect files
@@ -359,7 +437,9 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 
 	var allRawFiles []*RARFileEntry
 	isHeaderEncrypted := false
-	for _, result := range results {
+	volumeNumbers := make([]int, len(results))
+	for i, result := range results {
+		volumeNumbers[i] = result.volumeNumber
 		if result.err != nil {
 			continue
 		}
@@ -376,6 +456,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 			IsMultiVol:        len(volumes) > 1,
 			IsHeaderEncrypted: true,
 			Files:             nil,
+			VolumeNumbers:     volumeNumbers,
 		}, nil
 	}
 
@@ -402,6 +483,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		IsDataEncrypted:   len(encryptionKey) > 0,
 		EncryptionKey:     encryptionKey,
 		Files:             files,
+		VolumeNumbers:     volumeNumbers,
 	}
 	return archiveInfo, nil
 }

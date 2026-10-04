@@ -197,6 +197,9 @@ type parseRAR5StreamResult struct {
 	IsHeaderEncrypted bool
 	EncryptionKey     []byte // AES key for file data decryption (if encrypted)
 	EncryptionIV      []byte // AES IV for file data decryption (if encrypted)
+	// VolumeNumber is the 0-based volume number recorded in the main archive
+	// header, or -1 if it couldn't be determined (e.g. encrypted headers).
+	VolumeNumber int
 }
 
 // parseRAR5Stream parses RAR 5.0 headers from a stream reader
@@ -204,7 +207,8 @@ type parseRAR5StreamResult struct {
 // If password is provided and headers are encrypted, it will decrypt them
 func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeName string, password string) (*parseRAR5StreamResult, error) {
 	result := &parseRAR5StreamResult{
-		Files: make([]*RARFileEntry, 0),
+		Files:        make([]*RARFileEntry, 0),
+		VolumeNumber: -1,
 	}
 
 	var encryptionKey []byte // Key for decrypting file data
@@ -309,6 +313,10 @@ func (p *RARParser) parseRAR5Stream(stream *rarReader, volumeIndex int, volumeNa
 
 		// Data offset is immediately after the header (absolute position in stream)
 		dataOffsetAbsolute := headerStartPos + int64(headerSize)
+
+		if header.Type == RAR5HeaderTypeMain {
+			result.VolumeNumber = parseRAR5MainVolumeNumber(header.Data)
+		}
 
 		// Parse file headers
 		if header.Type == RAR5HeaderTypeFile {
@@ -574,6 +582,25 @@ func (p *RARParser) readRAR5HeaderFromStream(stream *rarReader) (*rar5HeaderData
 	}, totalHeaderSize, dataAreaSize, nil
 }
 
+// parseRAR5MainVolumeNumber returns the 0-based volume number stored in a RAR5
+// main archive header body (archive flags vint, then an optional volume number
+// vint). The first volume omits the field, so a multi-volume header without it
+// is volume 0. Returns -1 if the header can't be read.
+func parseRAR5MainVolumeNumber(data []byte) int {
+	flags, n := parseVIntFromBuffer(data)
+	if n == 0 {
+		return -1
+	}
+	if flags&RAR5MainFlagVolumeNumber == 0 {
+		return 0
+	}
+	num, m := parseVIntFromBuffer(data[n:])
+	if m == 0 {
+		return -1
+	}
+	return int(num)
+}
+
 // parseVIntFromBuffer parses a vint from a byte slice without any Read calls
 // Returns (value, bytesConsumed) - bytesConsumed is 0 if buffer doesn't contain complete vint
 func parseVIntFromBuffer(buf []byte) (uint64, int) {
@@ -643,8 +670,11 @@ func readVInt(r *bytes.Reader) (uint64, error) {
 
 // parseRAR4Stream parses RAR 4.x headers from a stream reader
 // This properly tracks offsets by reading headers sequentially and skipping data
-func (p *RARParser) parseRAR4Stream(stream *rarReader, volumeIndex int, volumeName string, volumeSize int64) ([]*RARFileEntry, error) {
+// It also returns the 0-based volume number (from the end-of-archive block, or
+// the first-volume archive flag), or -1 if it couldn't be determined.
+func (p *RARParser) parseRAR4Stream(stream *rarReader, volumeIndex int, volumeName string, volumeSize int64) ([]*RARFileEntry, int, error) {
 	var files []*RARFileEntry
+	volumeNumber := -1
 
 	// Stream position is already at 7 (after RAR4 signature)
 	// The signature is: "Rar!\x1A\x07\x00" (7 bytes)
@@ -662,6 +692,17 @@ func (p *RARParser) parseRAR4Stream(stream *rarReader, volumeIndex int, volumeNa
 		// Data offset is immediately after the header
 		dataOffsetAbsolute := stream.Position()
 		var dataSkipSize int64
+
+		switch header.Type {
+		case RAR4HeaderTypeArchive:
+			if header.Flags&RAR4ArchiveFlagFirstVolume != 0 {
+				volumeNumber = 0
+			}
+		case RAR4HeaderTypeEnd:
+			if n := parseRAR4EndVolumeNumber(header); n >= 0 {
+				volumeNumber = n
+			}
+		}
 
 		// Parse file headers
 		if header.Type == RAR4HeaderTypeFile {
@@ -700,7 +741,7 @@ func (p *RARParser) parseRAR4Stream(stream *rarReader, volumeIndex int, volumeNa
 				if err == io.EOF {
 					break
 				}
-				return nil, fmt.Errorf("failed to skip RAR4 data section: %w", err)
+				return nil, -1, fmt.Errorf("failed to skip RAR4 data section: %w", err)
 			}
 		}
 
@@ -710,7 +751,23 @@ func (p *RARParser) parseRAR4Stream(stream *rarReader, volumeIndex int, volumeNa
 		}
 	}
 
-	return files, nil
+	return files, volumeNumber, nil
+}
+
+// parseRAR4EndVolumeNumber returns the 0-based volume number stored in a RAR4
+// end-of-archive block, or -1 if the block doesn't carry one.
+func parseRAR4EndVolumeNumber(header *rar4Header) int {
+	if header.Flags&RAR4EndFlagVolNumber == 0 {
+		return -1
+	}
+	off := 0
+	if header.Flags&RAR4EndFlagDataCRC != 0 {
+		off = 4
+	}
+	if len(header.Data) < off+2 {
+		return -1
+	}
+	return int(binary.LittleEndian.Uint16(header.Data[off : off+2]))
 }
 
 // readRAR4HeaderFromStream reads a single RAR 4.x header from stream

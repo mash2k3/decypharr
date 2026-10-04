@@ -852,6 +852,18 @@ func (p *NZBParser) processFileGroup(ctx context.Context, group *FileGroup, pass
 	case storage.NZBFileTypeRar:
 		rarParser := NewRARParser(p.manager, p.maxConcurrent, p.logger)
 		files, err := rarParser.Process(ctx, group, password)
+		if err == nil {
+			if verr := p.verifyMediaHeaders(ctx, files); verr != nil {
+				// Volumes were stitched in the wrong order and the RAR headers
+				// couldn't say which is right. PAR2 knows every volume's real
+				// filename (.partNN.rar), so rename from it and retry; if that
+				// isn't possible, fail the import rather than serve garbage.
+				if len(p.par2Descs) > 0 && !group.par2Attempted {
+					return p.par2DeobfuscationAttempt(ctx, group, password)
+				}
+				return nil, verr
+			}
+		}
 		if err != nil && strings.Contains(err.Error(), "unknown RAR format") {
 			p.logger.Warn().Str("group", group.BaseName).Msg("RAR parser failed with unknown format, attempting fallback to SevenZip parser")
 			zipParser := NewSevenZParser(p.manager, p.maxConcurrent, p.logger)
