@@ -14,6 +14,21 @@ var UsenetSegmentMissingError = &Error{
 	Code:       "usenet_segment_missing",
 }
 
+// A missing or undecodable .meta manifest never recovers on its own: the
+// segment map the file needs is gone, so every probe fails the same way.
+// Repair treats both as broken instead of deferring them forever.
+var UsenetManifestMissingError = &Error{
+	statusCode: 404,
+	err:        errors.New("usenet metadata manifest is missing"),
+	Code:       "usenet_manifest_missing",
+}
+
+var UsenetManifestInvalidError = &Error{
+	statusCode: 422,
+	err:        errors.New("usenet metadata manifest is invalid"),
+	Code:       "usenet_manifest_invalid",
+}
+
 var TrafficExceededError = &Error{
 	statusCode: 503,
 	err:        errors.New("traffic limit exceeded"),

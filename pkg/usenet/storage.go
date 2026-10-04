@@ -3,6 +3,7 @@ package usenet
 import (
 	"errors"
 	"fmt"
+	"github.com/sirrobot01/decypharr/internal/customerror"
 	"os"
 	"path/filepath"
 	"sync"
@@ -153,14 +154,20 @@ func (s *NZBStorage) GetNZB(id string) (*storage.NZB, error) {
 	data, err := os.ReadFile(path)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return nil, fmt.Errorf("%w: %s", ErrNZBNotFound, id)
+			// Only call the manifest missing when its directory is there: an
+			// unmounted data dir makes every read ENOENT, and that must not
+			// mark the whole library permanently broken.
+			if _, dirErr := os.Stat(s.metaDir); dirErr != nil {
+				return nil, fmt.Errorf("%w: %s: meta directory unavailable: %v", ErrNZBNotFound, id, dirErr)
+			}
+			return nil, fmt.Errorf("%w: %s: %w", ErrNZBNotFound, id, customerror.UsenetManifestMissingError)
 		}
 		return nil, fmt.Errorf("failed to read NZB meta file: %w", err)
 	}
 
 	var pb NZBProto
 	if err := proto.Unmarshal(data, &pb); err != nil {
-		return nil, fmt.Errorf("failed to unmarshal NZB: %w", err)
+		return nil, fmt.Errorf("failed to unmarshal NZB %s: %w: %w", id, err, customerror.UsenetManifestInvalidError)
 	}
 
 	return protoToNZB(&pb), nil

@@ -477,10 +477,18 @@ func (r *Repair) probeNZBFile(ctx context.Context, entry *storage.Entry, name st
 		return res
 	}
 	var customErr *customerror.Error
-	if errors.Is(err, customerror.UsenetSegmentMissingError) || (errors.As(err, &customErr) && customErr.IsPermanent()) {
+	switch {
+	case errors.Is(err, customerror.UsenetManifestMissingError):
+		// The local segment map is gone; re-probing returns this forever.
+		res.broken = true
+		res.reason = "usenet_manifest_missing"
+	case errors.Is(err, customerror.UsenetManifestInvalidError):
+		res.broken = true
+		res.reason = "usenet_manifest_invalid"
+	case errors.Is(err, customerror.UsenetSegmentMissingError) || (errors.As(err, &customErr) && customErr.IsPermanent()):
 		res.broken = true
 		res.reason = "usenet_segment_missing"
-	} else {
+	default:
 		res.reason = "usenet_probe_error"
 	}
 	return res
