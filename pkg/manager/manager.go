@@ -626,6 +626,17 @@ func (m *Manager) ReportLiveReadFailure(infoHash, entryName, fileName string, si
 	m.repair.RecordLiveReadFailure(infoHash, entryName, fileName, size)
 }
 
+// ReportPermanentUsenetReadFailure is ReportLiveReadFailure for read paths that
+// don't classify errors themselves (WebDAV). It only marks the file broken when
+// the usenet layer has flagged it permanently failed (missing article, or a
+// segment that decodes short), so a timeout or other transient error never does.
+func (m *Manager) ReportPermanentUsenetReadFailure(infoHash, entryName, fileName string, size int64) {
+	if m.usenet == nil || m.usenet.IsFilePermanentlyFailed(infoHash, fileName) == nil {
+		return
+	}
+	m.ReportLiveReadFailure(infoHash, entryName, fileName, size)
+}
+
 // RefreshTorrent forces an immediate sync for a specific torrent by infohash.
 // Used after re-insertion to pick up the new RD ID without waiting for the 2-min sync cycle.
 func (m *Manager) RefreshTorrent(infohash string) (*storage.Entry, error) {

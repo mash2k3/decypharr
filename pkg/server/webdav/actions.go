@@ -104,6 +104,14 @@ func (h *Handler) handleDownload(info *manager.FileInfo, w http.ResponseWriter, 
 		// Use the file path as key for rate limiting - same file error logged once per 30s
 		logKey := fmt.Sprintf("%s/%s", info.Parent(), info.Name())
 
+		// DFS reports failed reads to repair at once; WebDAV (rclone mounts)
+		// didn't, so a file found dead while streaming stayed "healthy" until
+		// the next full recheck (168h by default) and cli_debrid never
+		// replaced it. Only permanent usenet failures are reported.
+		if entry.IsNZB() {
+			h.manager.ReportPermanentUsenetReadFailure(entry.InfoHash, info.Parent(), info.Name(), info.Size())
+		}
+
 		var streamErr *customerror.Error
 		if errors.As(err, &streamErr) {
 			if !streamErr.HeadersWritten {
