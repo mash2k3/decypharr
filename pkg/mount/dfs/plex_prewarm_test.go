@@ -135,10 +135,39 @@ func TestPlexPathCandidatesFollowsSymlink(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := plexPathCandidates(link)
-	if len(got) != 2 || got[0] != target || got[1] != link {
+	if len(got) != 2 || got[0].path != target || !got[0].isSymlinkTarget || got[1].path != link || got[1].isSymlinkTarget {
 		t.Fatalf("candidates = %v, want [target, link]", got)
 	}
 	if got := plexPathCandidates(dir + "/not-a-link.mkv"); len(got) != 1 {
 		t.Fatalf("plain path: %v", got)
+	}
+}
+
+type fakeMountChild struct {
+	name string
+	dir  bool
+	size int64
+}
+
+func (f fakeMountChild) Name() string { return f.name }
+func (f fakeMountChild) IsDir() bool  { return f.dir }
+func (f fakeMountChild) Size() int64  { return f.size }
+
+func TestPickMountChild(t *testing.T) {
+	const big = 2 * minPlausibleEpisodeSize
+	single := []mountChild{fakeMountChild{name: "obf123.mkv", size: big}, fakeMountChild{name: "a.nfo", size: 10}}
+	withSeasonDir := []mountChild{fakeMountChild{name: "Season 01", dir: true}, fakeMountChild{name: "featurette.mkv", size: big}}
+
+	if got := pickMountChild(single, "OBF123.MKV", false); got != 0 {
+		t.Fatalf("exact name (case-insensitive) = %d, want 0", got)
+	}
+	if got := pickMountChild(single, "Show - S01E02 (Release.mkv).mkv", true); got != 0 {
+		t.Fatalf("symlink target with renamed file should use the single video, got %d", got)
+	}
+	if got := pickMountChild(single, "Show - S01E02.mkv", false); got != -1 {
+		t.Fatalf("a Plex library path must not guess the single video, got %d", got)
+	}
+	if got := pickMountChild(withSeasonDir, "Show - S01E02.mkv", true); got != -1 {
+		t.Fatalf("an entry with a season folder must not pick its top-level extra, got %d", got)
 	}
 }

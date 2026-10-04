@@ -250,62 +250,91 @@ func findFileByPlexPath(mgr *manager.Manager, plexPath string) *manager.FileInfo
 	if mgr == nil {
 		return nil
 	}
-	for _, p := range plexPathCandidates(plexPath) {
-		if f := findFileByMountPath(mgr, p); f != nil {
+	for _, c := range plexPathCandidates(plexPath) {
+		if f := findFileByMountPath(mgr, c.path, c.isSymlinkTarget); f != nil {
 			return f
 		}
 	}
 	return nil
 }
 
+type plexPathCandidate struct {
+	path string
+	// isSymlinkTarget: the path came from a cli_debrid symlink, so its parent
+	// folder is known to be a mount entry.
+	isSymlinkTarget bool
+}
+
 // plexPathCandidates returns the symlink target first when plexPath is a
 // symlink this process can read, then plexPath itself.
-func plexPathCandidates(plexPath string) []string {
+func plexPathCandidates(plexPath string) []plexPathCandidate {
 	if plexPath == "" {
 		return nil
 	}
-	var out []string
+	var out []plexPathCandidate
 	if target, err := os.Readlink(plexPath); err == nil {
 		if !filepath.IsAbs(target) {
 			target = filepath.Join(filepath.Dir(plexPath), target)
 		}
-		out = append(out, target)
+		out = append(out, plexPathCandidate{path: target, isSymlinkTarget: true})
 	}
-	return append(out, plexPath)
+	return append(out, plexPathCandidate{path: plexPath})
 }
 
 // findFileByMountPath looks for a cli_mount entry named after the file's
 // parent folder (or the one above it, for releases with a season subfolder)
-// and returns the file of that name in it, or its only video file when the
-// name inside differs.
-func findFileByMountPath(mgr *manager.Manager, p string) *manager.FileInfo {
-	base := strings.ToLower(filepath.Base(p))
+// and returns the file of that name in it. Only for a symlink target's own
+// entry folder may it fall back to the entry's single video when the name
+// inside differs: a Plex library path's folders ("Show (2020)", "Season 01")
+// can share a name with an unrelated entry.
+func findFileByMountPath(mgr *manager.Manager, p string, isSymlinkTarget bool) *manager.FileInfo {
+	base := filepath.Base(p)
 	dir := filepath.Dir(p)
 	for level := 0; level < 2 && dir != "." && dir != "/"; level++ {
 		entryDir, children := mgr.GetTorrentChildren(filepath.Base(dir))
 		if entryDir != nil {
-			var onlyVideo *manager.FileInfo
-			videos := 0
+			kids := make([]mountChild, len(children))
 			for i := range children {
-				child := &children[i]
-				if child.IsDir() {
-					continue
-				}
-				if strings.ToLower(child.Name()) == base {
-					return child
-				}
-				if child.Size() >= minPlausibleEpisodeSize {
-					videos++
-					onlyVideo = child
-				}
+				kids[i] = &children[i]
 			}
-			if videos == 1 {
-				return onlyVideo
+			if i := pickMountChild(kids, base, isSymlinkTarget && level == 0); i >= 0 {
+				return &children[i]
 			}
 		}
 		dir = filepath.Dir(dir)
 	}
 	return nil
+}
+
+type mountChild interface {
+	Name() string
+	IsDir() bool
+	Size() int64
+}
+
+// pickMountChild returns the index of the child named base (case-insensitive)
+// or, when allowOnlyVideo is set, of the entry's only video-sized file
+// provided the entry has no subfolders (episodes in a season folder would
+// leave a top-level extra as the "only" video). -1 if neither.
+func pickMountChild(children []mountChild, base string, allowOnlyVideo bool) int {
+	only, videos, hasDirs := -1, 0, false
+	for i, child := range children {
+		if child.IsDir() {
+			hasDirs = true
+			continue
+		}
+		if strings.EqualFold(child.Name(), base) {
+			return i
+		}
+		if child.Size() >= minPlausibleEpisodeSize {
+			videos++
+			only = i
+		}
+	}
+	if allowOnlyVideo && !hasDirs && videos == 1 {
+		return only
+	}
+	return -1
 }
 
 // findFileByBasename does an exact (case-insensitive) filename match across
