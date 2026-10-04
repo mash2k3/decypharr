@@ -361,6 +361,13 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 		renameMediaFiles(files, cfg.Usenet.DeobfuscateMode, nzb.Name, p.logger)
 	}
 
+	// Before the size/sample filter, so a duplicate renamed as a sample is
+	// filtered like any other sample.
+	if renamed := uniquifyFileNames(files); renamed > 0 {
+		p.logger.Warn().Int("renamed", renamed).Str("nzb", nzb.Name).
+			Msg("Files with duplicate names in NZB were renamed so each one is listed and streamed separately")
+	}
+
 	skippedFiles := 0
 	var skippedErr error
 	// Calculate total Size
@@ -383,37 +390,81 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 		}
 		return nil, fmt.Errorf("no valid files found in NZB after processing")
 	}
-	if renamed := uniquifyFileNames(nzb.Files); renamed > 0 {
-		p.logger.Warn().Int("renamed", renamed).Str("nzb", nzb.Name).
-			Msg("Files with duplicate names in NZB were renamed so each one is listed and streamed separately")
-	}
 	return nzb, nil
 }
 
-// uniquifyFileNames gives every file in an NZB a distinct name by appending
-// " (2)", " (3)", ... before the extension. The manager keys an entry's files
-// by name (last one wins) while the stream path picked the first match, so two
-// files sharing a name (e.g. a main file and a sample from separate obfuscated
-// RAR sets) were listed with one file's size and streamed from the other.
+// sampleSizeRatio: a file sharing its name with one at least this many times
+// its size is that release's sample.
+const sampleSizeRatio = 4
+
+// uniquifyFileNames gives every file in an NZB a distinct name. The manager
+// keys an entry's files by name (last one wins) while the stream path picked
+// the first match, so two files sharing a name (e.g. a main file and a sample
+// from separate obfuscated RAR sets) were listed with one file's size and
+// streamed from the other.
+//
+// Within a group of same-named files the largest keeps the name, whatever its
+// position. A much smaller one (under 1/sampleSizeRatio of it) is the sample
+// and becomes "<name>-sample<ext>": the AllowSamples filter then drops it, and
+// Plex ignores "-sample" files when samples are allowed. Others get " (2)",
+// " (3)", ... before the extension. Returns how many files were renamed.
 func uniquifyFileNames(files []storage.NZBFile) int {
-	seen := make(map[string]struct{}, len(files))
-	renamed := 0
+	taken := make(map[string]struct{}, len(files))
+	groups := make(map[string][]int, len(files))
+	var order []string
 	for i := range files {
-		name := files[i].Name
-		if _, dup := seen[strings.ToLower(name)]; dup {
+		key := strings.ToLower(files[i].Name)
+		taken[key] = struct{}{}
+		if _, ok := groups[key]; !ok {
+			order = append(order, key)
+		}
+		groups[key] = append(groups[key], i)
+	}
+	free := func(candidate string) bool {
+		_, used := taken[strings.ToLower(candidate)]
+		return !used
+	}
+
+	renamed := 0
+	for _, key := range order {
+		idxs := groups[key]
+		if len(idxs) < 2 {
+			continue
+		}
+		largest := idxs[0]
+		for _, i := range idxs[1:] {
+			if files[i].Size > files[largest].Size {
+				largest = i
+			}
+		}
+		for _, i := range idxs {
+			if i == largest {
+				continue
+			}
+			name := files[i].Name
 			ext := filepath.Ext(name)
 			base := strings.TrimSuffix(name, ext)
-			for n := 2; ; n++ {
-				candidate := fmt.Sprintf("%s (%d)%s", base, n, ext)
-				if _, taken := seen[strings.ToLower(candidate)]; !taken {
-					name = candidate
+			isSample := files[i].Size > 0 && files[i].Size*sampleSizeRatio < files[largest].Size
+			candidate := ""
+			for n := 1; ; n++ {
+				switch {
+				case isSample && n == 1:
+					candidate = base + "-sample" + ext
+				case isSample:
+					candidate = fmt.Sprintf("%s-sample (%d)%s", base, n, ext)
+				case n == 1:
+					continue
+				default:
+					candidate = fmt.Sprintf("%s (%d)%s", base, n, ext)
+				}
+				if free(candidate) {
 					break
 				}
 			}
-			files[i].Name = name
+			taken[strings.ToLower(candidate)] = struct{}{}
+			files[i].Name = candidate
 			renamed++
 		}
-		seen[strings.ToLower(name)] = struct{}{}
 	}
 	return renamed
 }
@@ -1247,18 +1298,29 @@ func (p *NZBParser) detectFileTypeByContent(ctx context.Context, file nzbparser.
 	fileType := p.detectFileTypeFromContent(data.Snippet)
 	name := data.Name
 	if fileType == storage.NZBFileTypeMedia {
-		// Obfuscated posts often carry no extension at all. processMediaFile
-		// drops a media file it can't find an extension for, so give it the
-		// one its signature implies. Names that already have an extension
-		// (e.g. split parts "x.001") are left alone so they keep grouping.
+		// Obfuscated posts often carry no extension, or a random dotted
+		// suffix that only looks like one ("a8f3.d9x"). processMediaFile and
+		// the extension filter drop a media file without a real media
+		// extension, so give it the one its signature implies. Real media
+		// extensions and split parts ("x.001") are left alone so they keep
+		// grouping.
 		if name == "" {
 			name = file.Filename
 		}
-		if name != "" && filepath.Ext(name) == "" {
+		if name != "" && !hasKnownExtension(name) {
 			name += mediaExtensionFromContent(data.Snippet)
 		}
 	}
 	return fileType, name, nil
+}
+
+var splitPartExtRE = regexp.MustCompile(`^\.\d+$`)
+
+// hasKnownExtension reports whether name ends in a media extension or a
+// numbered split-part extension (.001).
+func hasKnownExtension(name string) bool {
+	ext := filepath.Ext(name)
+	return ext != "" && (utils.IsMediaFile(name) || splitPartExtRE.MatchString(ext))
 }
 
 // mediaExtensionFromContent returns the extension a media signature implies,

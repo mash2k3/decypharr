@@ -47,3 +47,18 @@ func TestProcessMediaFileNeedsExtension(t *testing.T) {
 		t.Fatalf("media with inferred extension not kept: %+v", f)
 	}
 }
+
+func TestHasKnownExtension(t *testing.T) {
+	for name, want := range map[string]bool{
+		"a8f3.d9x":          false, // obfuscated dotted name
+		"2fda1f41bb2b47eeb": false,
+		"Movie.2020.mkv":    true,
+		"Movie.2020.MP4":    true,
+		"x.001":             true, // split part keeps grouping
+		"Show.S01E01.WEB":   false,
+	} {
+		if got := hasKnownExtension(name); got != want {
+			t.Errorf("hasKnownExtension(%q) = %v, want %v", name, got, want)
+		}
+	}
+}

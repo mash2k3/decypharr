@@ -782,12 +782,19 @@ func (u *Usenet) IsFilePermanentlyFailed(nzoID, filename string) error {
 	if err != nil {
 		return nil
 	}
-	for _, f := range nzb.Files {
-		if f.Name == filename && f.IsDeleted {
+	// Last match, the file getFile streams when an older NZB holds duplicate
+	// names; another same-named file being deleted says nothing about it.
+	for i := len(nzb.Files) - 1; i >= 0; i-- {
+		f := nzb.Files[i]
+		if f.Name != filename {
+			continue
+		}
+		if f.IsDeleted {
 			permanentErr := fmt.Errorf("file %s is permanently unavailable on Usenet", filename)
 			u.failedFiles.Store(key, permanentErr)
 			return customerror.NewArticleNotFoundError(permanentErr)
 		}
+		break
 	}
 	return nil
 }
@@ -803,13 +810,20 @@ func (u *Usenet) getFiles(nzoID string, filenames []string) (map[string]*storage
 		requested[filename] = struct{}{}
 	}
 
+	// Each name resolves to its last file, as in getFile, so duplicate names in
+	// an older NZB give the same file on every path; a deleted one is skipped.
 	files := make(map[string]*storage.NZBFile, len(requested))
-	for i := range nzb.Files {
+	resolved := make(map[string]struct{}, len(requested))
+	for i := len(nzb.Files) - 1; i >= 0; i-- {
 		source := nzb.Files[i]
-		if source.IsDeleted {
+		if _, ok := requested[source.Name]; !ok {
 			continue
 		}
-		if _, ok := requested[source.Name]; !ok {
+		if _, done := resolved[source.Name]; done {
+			continue
+		}
+		resolved[source.Name] = struct{}{}
+		if source.IsDeleted {
 			continue
 		}
 		file := source
