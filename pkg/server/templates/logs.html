@@ -26,11 +26,12 @@
 .log-component { color: #e8601c; }
 .log-msg { color: #c9d1d9; }
 .chip-active { border-color: #e8601c !important; background: rgba(232,96,28,0.15) !important; color: #e8601c !important; }
-#log-controls { gap: 8px; flex-wrap: nowrap; align-items: center; }
+/* Wrap on narrow screens instead of widening the page; the chip bar gets its own line when it can't fit 200px. */
+#log-controls { gap: 8px; flex-wrap: wrap; align-items: center; }
 #scroll-bottom-btn { display: none; }
 #level-select, #lines-select { width: 150px; min-width: 150px; flex-shrink: 0; }
 #filter-input { width: 200px; min-width: 200px; flex-shrink: 0; }
-#chip-bar { flex: 1; min-width: 0; }
+#chip-bar { flex: 1 1 200px; min-width: 0; }
 </style>
 
 <div class="space-y-3">

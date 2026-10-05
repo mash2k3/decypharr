@@ -608,3 +608,9 @@ nav[aria-label="Configuration Tabs"] {
 .tab-button:focus:not(:focus-visible) {
     outline: none;
 }
+
+/* daisyUI's .label is nowrap, so long help text inside form labels pushed pages
+   (download, plex) wider than the screen. Let it wrap within its container. */
+.label {
+    white-space: normal;
+}
