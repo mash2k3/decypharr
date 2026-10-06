@@ -71,21 +71,13 @@ func (e *EntryCache) _refreshEntry(name string) EntryCacheItem {
 	return item
 }
 
-// Refresh triggers a cache refresh with debouncing.
-// If called multiple times rapidly, only one refresh will occur.
+// Refresh drops every cached listing so the next read rebuilds it from storage.
+//
+// The cache only holds group listings (__all__, __bad__, torrents, nzbs, custom
+// folders, per-provider folders) and torrent:: listings, and all of them can be
+// changed by a sync. Deleting group names one by one missed the per-provider
+// folders (e.g. "RealDebrid"), which then stayed frozen until restart while
+// __all__ picked up new content.
 func (e *EntryCache) Refresh() {
-	e.entries.Delete(EntryAllFolder)
-	e.entries.Delete(EntryBadFolder)
-	e.entries.Delete(EntryTorrentFolder)
-	e.entries.Delete(EntryNZBFolder)
-	for k := range e.manager.config.CustomFolders {
-		e.entries.Delete(k)
-	}
-	// Also clear torrent-level cache entries to prevent stale file listings
-	e.entries.Range(func(key string, _ EntryCacheItem) bool {
-		if strings.HasPrefix(key, torrentEntryCachePrefix) {
-			e.entries.Delete(key)
-		}
-		return true
-	})
+	e.entries.Clear()
 }
