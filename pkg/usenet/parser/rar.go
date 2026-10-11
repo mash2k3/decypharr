@@ -215,6 +215,17 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		return nil, fmt.Errorf("RAR archive has encrypted headers; password required or incorrect")
 	}
 
+	// A volume whose yEnc header couldn't be read has its last segment sized
+	// by estimate. Its RAR headers say exactly how far its data reaches, so
+	// grow an estimate that falls short; otherwise the file's tail (where MKV
+	// keeps its Cues) is cut off and players refuse it.
+	if grown := growVolumesToRARParts(baseSegments, volumeInfos, archiveInfo.Files); grown > 0 {
+		p.logger.Warn().
+			Str("group", group.BaseName).
+			Int("volumes", grown).
+			Msg("RAR volume sizes were underestimated; grew them to the data their headers declare")
+	}
+
 	// Build volume offset map
 	volumeOffsetMap := buildVolumeOffsetMap(volumeInfos)
 
@@ -254,6 +265,13 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 
 		size := rarFile.UncompressedSize
 		if size <= 0 || (streamSize > 0 && size > streamSize) {
+			if size > 0 {
+				p.logger.Warn().
+					Str("file", name).
+					Int64("header_size", size).
+					Int64("streamable", streamSize).
+					Msg("RAR file is larger than its mapped segments; serving it truncated")
+			}
 			// Clamp to streamable size to avoid advertising bytes we can't serve.
 			size = streamSize
 		}
@@ -1080,6 +1098,40 @@ func (p *RARParser) parseRAR4FileHeader(header *rar4Header, volumeIndex int, vol
 }
 
 // buildVolumeOffsetMap builds a map of cumulative offsets for each volume
+// growVolumesToRARParts enlarges volumes that are smaller than the file data
+// their RAR headers place in them. Only a volume's last segment is ever
+// estimated, so the shortfall is added there, and only when it is under one
+// segment; a bigger gap means missing segments, which this can't fix.
+// Returns how many volumes were grown.
+func growVolumesToRARParts(baseSegments []storage.NZBSegment, volumeInfos []storage.ArchiveVolumeInfo, files []*RARFileEntry) int {
+	needed := make(map[int]int64)
+	for _, f := range files {
+		for _, part := range f.VolumeParts {
+			if end := part.DataOffset + part.PackedSize; end > needed[part.PartNumber] {
+				needed[part.PartNumber] = end
+			}
+		}
+	}
+
+	grown := 0
+	for i := range volumeInfos {
+		vol := &volumeInfos[i]
+		short := needed[i] - vol.Size
+		if short <= 0 || vol.SegmentEnd <= vol.SegmentStart || vol.SegmentEnd > len(baseSegments) {
+			continue
+		}
+		if short >= baseSegments[vol.SegmentStart].Bytes {
+			continue
+		}
+		last := &baseSegments[vol.SegmentEnd-1]
+		last.Bytes += short
+		last.EndOffset += short
+		vol.Size += short
+		grown++
+	}
+	return grown
+}
+
 func buildVolumeOffsetMap(volumeInfos []storage.ArchiveVolumeInfo) map[int]int64 {
 	offsetMap := make(map[int]int64)
 	var cumulativeOffset int64
