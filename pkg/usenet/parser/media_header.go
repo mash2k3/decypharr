@@ -20,9 +20,9 @@ const mediaHeaderProbeSize = 16
 // its container, which means the archive was stitched together wrong.
 var errBadMediaHeader = fmt.Errorf("extracted media file has an invalid container header")
 
-// mediaHeaderValid reports whether head looks like the start of a file with the
+// MediaHeaderValid reports whether head looks like the start of a file with the
 // given extension. Unknown extensions are always accepted.
-func mediaHeaderValid(name string, head []byte) bool {
+func MediaHeaderValid(name string, head []byte) bool {
 	switch strings.ToLower(filepath.Ext(name)) {
 	case ".mkv", ".webm":
 		return bytes.HasPrefix(head, []byte{0x1A, 0x45, 0xDF, 0xA3})
@@ -85,7 +85,7 @@ func (p *NZBParser) verifyMediaHeaders(ctx context.Context, files []*storage.NZB
 		}
 
 		head := data.Snippet[start : start+mediaHeaderProbeSize]
-		if !mediaHeaderValid(f.Name, head) {
+		if !MediaHeaderValid(f.Name, head) {
 			p.logger.Warn().
 				Str("file", f.Name).
 				Hex("head", head).

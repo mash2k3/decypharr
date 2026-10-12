@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"io/fs"
 	"os"
 	"os/exec"
@@ -11,12 +12,16 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sirrobot01/decypharr/pkg/usenet/parser"
 )
 
 const (
 	repairMediaProbeConcurrency = 4
 	repairMediaProbeTimeout     = 60 * time.Second
 	repairMediaProbeAttempts    = 2
+	// mountedHeaderProbeSize covers every signature parser.MediaHeaderValid checks.
+	mountedHeaderProbeSize = 16
 )
 
 type mediaProbeState uint8
@@ -66,7 +71,51 @@ func runMountedMediaProbeAttempt(ctx context.Context, path string) mediaProbeRes
 	if err := readMountedMediaRanges(ctx, path); err != nil {
 		return classifyMountedReadError(err)
 	}
+	if header := probeMountedHeader(ctx, path); header.state != mediaProbeHealthy {
+		return header
+	}
 	return runFFProbe(ctx, path)
+}
+
+// probeMountedHeader checks that a mounted media file starts with its
+// container's signature. A file whose articles all exist can still be
+// stitched in the wrong order; ffprobe may then "find" an audio stream in the
+// noise, but no player can open it. Only a completed read with the wrong
+// signature is broken; read errors and timeouts are unknown.
+func probeMountedHeader(ctx context.Context, path string) mediaProbeResult {
+	type readResult struct {
+		head []byte
+		err  error
+	}
+	// A FUSE read can't be cancelled, so it runs on its own goroutine and the
+	// probe gives up on it when ctx ends.
+	done := make(chan readResult, 1)
+	go func() {
+		f, err := os.Open(path)
+		if err != nil {
+			done <- readResult{err: err}
+			return
+		}
+		defer func() { _ = f.Close() }()
+		head := make([]byte, mountedHeaderProbeSize)
+		n, err := io.ReadFull(f, head)
+		if errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF) {
+			err = nil
+		}
+		done <- readResult{head: head[:n], err: err}
+	}()
+	select {
+	case <-ctx.Done():
+		return mediaProbeResult{state: mediaProbeUnknown, reason: "media_probe_timeout"}
+	case res := <-done:
+		if res.err != nil {
+			return classifyMountedReadError(res.err)
+		}
+		if !parser.MediaHeaderValid(path, res.head) {
+			return mediaProbeResult{state: mediaProbeBroken, reason: "media_header_invalid"}
+		}
+		return mediaProbeResult{state: mediaProbeHealthy}
+	}
 }
 
 func readMountedMediaRanges(ctx context.Context, path string) error {
