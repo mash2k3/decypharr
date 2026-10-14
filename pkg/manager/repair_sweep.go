@@ -422,10 +422,8 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 	} else {
 		res = r.probeTorrentFile(ctx, entry, file, name, res, opts)
 	}
-	// The mounted-media ffprobe check is gated by Repair.MediaProbeUsenet
-	// (see RepairConfig.MediaProbeEnabled), NZB entries only. Torrent and
-	// non-media probes retain their upstream provider-only behavior.
-	if !entry.IsNZB() || !r.cfg().MediaProbeEnabled() || res.broken || !res.healthy || !utils.IsMediaFile(name) {
+	// Torrent and non-media probes retain their upstream provider-only behavior.
+	if !entry.IsNZB() || res.broken || !res.healthy || !utils.IsMediaFile(name) {
 		return res
 	}
 	entryName := item.Name
@@ -433,6 +431,23 @@ func (r *Repair) probeFile(ctx context.Context, item *storage.EntryItem, name st
 		entryName = entry.GetFolder()
 	}
 	path, ok := mountedMediaPath(r.manager.config.Mount.MountPath, entryName, name)
+	// The mounted-media ffprobe check is gated by Repair.MediaProbeUsenet (see
+	// RepairConfig.MediaProbeEnabled). Without it, still check the container
+	// signature: one small read, and a wrong one proves the file unplayable.
+	if !r.cfg().MediaProbeEnabled() {
+		if !ok {
+			return res
+		}
+		headerCtx, cancel := context.WithTimeout(ctx, repairMediaProbeTimeout)
+		header := probeMountedHeader(headerCtx, path)
+		cancel()
+		if header.state == mediaProbeBroken {
+			res.healthy = false
+			res.broken = true
+			res.reason = header.reason
+		}
+		return res
+	}
 	if !ok {
 		res.healthy = false
 		res.reason = "media_probe_unavailable"
@@ -1249,6 +1264,7 @@ var replacementCleanupReasons = map[string]struct{}{
 	"usenet_segment_missing":   {},
 	"media_probe_failed":       {},
 	"media_no_playable_stream": {},
+	"media_header_invalid":     {},
 }
 
 type replacementVerifyTarget struct {
