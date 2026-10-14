@@ -28,6 +28,12 @@ func isSample(path string) bool {
 	return sampleRegex.MatchString(filename)
 }
 
+// IsSampleBlocked reports whether path names a sample that the AllowSamples
+// setting says to skip.
+func (c *Config) IsSampleBlocked(path string) bool {
+	return !c.AllowSamples && isSample(path)
+}
+
 func (c *Config) IsFileAllowed(filename string, filesize int64) error {
 	// Skip samples if configured
 	if !c.AllowSamples && isSample(filename) {

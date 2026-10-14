@@ -356,6 +356,13 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 
 	cfg := config.Get()
 
+	// Before renaming: see dropSamples.
+	files, skippedFiles := dropSamples(files, cfg)
+	var skippedErr error
+	if skippedFiles > 0 {
+		skippedErr = config.ErrFileIsSample
+	}
+
 	// Handle deobfuscation renaming for media files
 	if p.isDeobfuscationEnabled() {
 		renameMediaFiles(files, cfg.Usenet.DeobfuscateMode, nzb.Name, p.logger)
@@ -368,8 +375,6 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 			Msg("Files with duplicate names in NZB were renamed so each one is listed and streamed separately")
 	}
 
-	skippedFiles := 0
-	var skippedErr error
 	// Calculate total Size
 	for _, file := range files {
 		if err := cfg.IsFileAllowed(file.Name, file.Size); err != nil {
@@ -391,6 +396,25 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 		return nil, fmt.Errorf("no valid files found in NZB after processing")
 	}
 	return nzb, nil
+}
+
+// dropSamples removes samples (when AllowSamples is off) by their real names
+// and archive paths, and returns how many it removed. It must run before
+// renameMediaFiles: when the sample is the only media file left (the main
+// file sat in a nested archive), the single-file rename gives it the NZB name
+// and the later filter can no longer tell it is a sample, so an 85 MB sample
+// was served as the episode.
+func dropSamples(files []storage.NZBFile, cfg *config.Config) ([]storage.NZBFile, int) {
+	kept := files[:0]
+	dropped := 0
+	for _, file := range files {
+		if cfg.IsSampleBlocked(file.Name) || (file.InternalPath != "" && cfg.IsSampleBlocked(file.InternalPath)) {
+			dropped++
+			continue
+		}
+		kept = append(kept, file)
+	}
+	return kept, dropped
 }
 
 // sampleSizeRatio: a file sharing its name with one at least this many times
@@ -520,6 +544,29 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) ma
 
 	unknownResults := p.batchDetectContentTypes(ctx, unknownFiles)
 
+	// Obfuscated posts can give one volume a real-looking subject
+	// ("<random>.part01.rar") and leave the rest extensionless. The
+	// extensionless ones group by their yEnc names, so the subject-named one
+	// lands in a group of its own and the archive is split in two: one half
+	// serves only its first volume, the other has no start. Once content
+	// detection has found RAR volumes, read the yEnc names of the
+	// subject-named RAR files too so every volume groups by its real name.
+	if containsRarResult(unknownResults) {
+		var subjectRars []nzbparser.NzbFile
+		var subjectRarIdx []int
+		for i, item := range allFiles {
+			if item.fileType == storage.NZBFileTypeRar {
+				subjectRars = append(subjectRars, item.file)
+				subjectRarIdx = append(subjectRarIdx, i)
+			}
+		}
+		for j, r := range p.batchDetectContentTypes(ctx, subjectRars) {
+			if r.fileType == storage.NZBFileTypeRar && r.actualFilename != "" {
+				allFiles[subjectRarIdx[j]] = r
+			}
+		}
+	}
+
 	// Add unknown results
 	allFiles = append(allFiles, unknownResults...)
 
@@ -530,6 +577,15 @@ func (p *NZBParser) groupFiles(ctx context.Context, files nzbparser.NzbFiles) ma
 	groups = p.mergeObfuscatedRarGroups(groups)
 
 	return groups
+}
+
+func containsRarResult(results []contentResult) bool {
+	for _, r := range results {
+		if r.fileType == storage.NZBFileTypeRar && r.actualFilename != "" {
+			return true
+		}
+	}
+	return false
 }
 
 // mergeObfuscatedRarGroups detects and merges RAR FileGroups that likely belong

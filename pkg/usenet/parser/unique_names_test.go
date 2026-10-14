@@ -67,3 +67,38 @@ func TestUniquifyFileNamesNoDuplicates(t *testing.T) {
 		t.Fatalf("unexpected rename: %d %+v", got, files)
 	}
 }
+
+// Tires.S03E04.MULTI.1080p.WEB.X264-HiggsBoson (2026-10-14): the real episode
+// sat in a nested RAR set, so the only media file left was the sample. The
+// single-file rename gave it the NZB name before the sample filter ran, and the
+// 85 MB sample was imported as the episode.
+func TestDropSamplesBeforeRename(t *testing.T) {
+	files := []storage.NZBFile{
+		{
+			Name:         "tires.s03e04.multi.1080p.web.x264-higgsboson-sample.mkv",
+			InternalPath: "Tires.S03E04.MULTI.1080p.WEB.X264-HiggsBoson/Sample/tires.s03e04.multi.1080p.web.x264-higgsboson-sample.mkv",
+			FileType:     storage.NZBFileTypeMedia,
+			Size:         85336151,
+		},
+	}
+	kept, dropped := dropSamples(files, &config.Config{})
+	if dropped != 1 || len(kept) != 0 {
+		t.Fatalf("dropped %d, kept %+v; want the sample dropped", dropped, kept)
+	}
+
+	// The sample can also hide behind a clean name, known only by its path.
+	files = []storage.NZBFile{
+		{Name: "episode.mkv", InternalPath: "Release/Sample/release-sample.mkv"},
+		{Name: "episode.mkv", InternalPath: "Release/release.mkv"},
+	}
+	kept, dropped = dropSamples(files, &config.Config{})
+	if dropped != 1 || len(kept) != 1 || kept[0].InternalPath != "Release/release.mkv" {
+		t.Fatalf("dropped %d, kept %+v; want only the main file kept", dropped, kept)
+	}
+
+	// AllowSamples keeps them.
+	files = []storage.NZBFile{{Name: "x-sample.mkv"}}
+	if kept, dropped = dropSamples(files, &config.Config{AllowSamples: true}); dropped != 0 || len(kept) != 1 {
+		t.Fatalf("AllowSamples: dropped %d", dropped)
+	}
+}
