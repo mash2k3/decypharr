@@ -231,6 +231,7 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 
 	files := make([]*storage.NZBFile, 0, len(archiveInfo.Files))
 	hasNoneStored := false
+	hasTruncated := false
 
 	// Parse each file in the RAR archive
 	for _, rarFile := range archiveInfo.Files {
@@ -264,6 +265,18 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		}
 
 		size := rarFile.UncompressedSize
+		if size > 0 && streamSize > 0 && size-streamSize > size/maxTruncatedFraction {
+			// Whole volumes are missing (e.g. an obfuscated set split across
+			// two groups): the file can't be played past the gap, so don't
+			// import it. A replacement release is better than a stub.
+			p.logger.Warn().
+				Str("file", name).
+				Int64("header_size", size).
+				Int64("streamable", streamSize).
+				Msg("RAR file is missing most of its volumes; skipping it")
+			hasTruncated = true
+			continue
+		}
 		if size <= 0 || (streamSize > 0 && size > streamSize) {
 			if size > 0 {
 				p.logger.Warn().
@@ -311,6 +324,9 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	}
 
 	if len(files) == 0 {
+		if hasTruncated {
+			return nil, fmt.Errorf("RAR archive is missing volumes; its files can't be served whole")
+		}
 		if hasNoneStored {
 			return nil, fmt.Errorf("RAR archive contains no stored (uncompressed) files; cannot stream")
 		}
@@ -318,6 +334,12 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	}
 	return files, nil
 }
+
+// maxTruncatedFraction: a RAR file whose mapped segments fall short of its
+// header size by more than 1/maxTruncatedFraction of it is missing whole
+// volumes and is skipped. Smaller gaps (an underestimated last segment) are
+// served clamped.
+const maxTruncatedFraction = 100
 
 const (
 	rarVolumeParseAttempts = 3
