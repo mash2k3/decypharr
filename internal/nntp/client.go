@@ -398,6 +398,11 @@ func (c *Client) isIdleExpired(lastUsed time.Time, now time.Time) bool {
 // Uses avast/retry-go for retry handling.
 func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connection) error) error {
 	var lastErr error
+	// lastTransientErr is the most recent failure that isn't proof the
+	// article is gone (connection, timeout, busy, panic). When any provider
+	// failed that way, the final error must stay transient - a not-found on
+	// one provider plus a timeout on another proves nothing.
+	var lastTransientErr error
 	var exclusions providerExclusions
 
 	for providerAttempts := 0; providerAttempts < len(c.providers); providerAttempts++ {
@@ -407,7 +412,17 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 
 		conn, connProvider, err := c.getAnyAvailableConnection(ctx, exclusions)
 		if err != nil {
+			// Every provider is excluded by earlier failures. A not-found
+			// excludes the whole backbone, so this is reached before the
+			// loop bound whenever providers share one; keep the real
+			// provider error rather than masking it as pool contention.
+			if errors.Is(err, ErrNoEligibleProviders) && lastErr != nil {
+				break
+			}
 			lastErr = err
+			if !errors.Is(err, ErrNoEligibleProviders) {
+				lastTransientErr = err
+			}
 			continue
 		}
 
@@ -518,18 +533,23 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 				exclusions.excludeHost(connProvider.Host)
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
 				exclusions.excludeHost(connProvider.Host)
+				lastTransientErr = err
 			default:
 				// Non-retriable error, return immediately
 				return err
 			}
 		} else if customerror.IsPanicError(err) {
 			exclusions.excludeHost(connProvider.Host)
+			lastTransientErr = err
 		} else {
 			// Unknown error type - return immediately
 			return err
 		}
 	}
 
+	if lastTransientErr != nil {
+		return lastTransientErr
+	}
 	if lastErr != nil {
 		return lastErr
 	}
