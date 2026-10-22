@@ -350,6 +350,65 @@ func TestDownloadWithPriority_WaitsThroughStoppingWindow(t *testing.T) {
 	}
 }
 
+// The kicker sets idle=true inside checkIdleTimeout but only closes kickerDone
+// after mu is released. A read landing in that gap must still start a fresh
+// kicker — the old one is about to exit — or no kicker ever runs again and the
+// stream is never untracked by the idle timeout.
+func TestDownloadWithPriority_RestartsKickerWhileOldOneIsExiting(t *testing.T) {
+	parentCtx := context.Background()
+	ctx, cancel := context.WithCancel(parentCtx)
+	defer cancel()
+
+	item := &CacheItem{
+		info: ItemInfo{
+			Size: 1024,
+			Rs:   ranges.Ranges{{Pos: 0, Size: 1024}}, // fully present: no network needed
+		},
+	}
+
+	// Old kicker has committed to exiting (idle=true) but hasn't closed its
+	// done channel yet.
+	exitingKickerDone := make(chan struct{})
+	dls := &Downloaders{
+		parentCtx:  parentCtx,
+		ctx:        ctx,
+		cancel:     cancel,
+		item:       item,
+		idle:       true,
+		kickerDone: exitingKickerDone,
+	}
+	dls.stopCond = sync.NewCond(&dls.mu)
+
+	if err := dls.DownloadWithPriority(context.Background(), ranges.Range{Pos: 0, Size: 1024}, false); err != nil {
+		t.Fatalf("DownloadWithPriority: %v", err)
+	}
+	close(exitingKickerDone) // old kicker finishes exiting
+
+	dls.mu.Lock()
+	newKickerDone := dls.kickerDone
+	idle := dls.idle
+	dls.mu.Unlock()
+
+	if idle {
+		t.Fatal("expected idle to be cleared by the read")
+	}
+	if newKickerDone == exitingKickerDone {
+		t.Fatal("no new kicker started: session left with no kicker after the old one exits")
+	}
+	select {
+	case <-newKickerDone:
+		t.Fatal("new kicker exited immediately")
+	default:
+	}
+
+	cancel()
+	select {
+	case <-newKickerDone:
+	case <-time.After(2 * time.Second):
+		t.Fatal("new kicker did not exit on ctx cancel")
+	}
+}
+
 // A Downloaders that is permanently Close()d while a caller is waiting out a
 // stopping window must wake that caller with the terminal error instead of
 // hanging forever waiting for a stopping->false transition that will now
