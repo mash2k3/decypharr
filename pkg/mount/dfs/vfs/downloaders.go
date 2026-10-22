@@ -388,7 +388,7 @@ func (dls *Downloaders) DownloadWithPriority(ctx context.Context, r ranges.Range
 	// on the old kickerDone channel.
 	if dls.idle && !dls.stopping {
 		dls.idle = false
-		dls.ensureKickerRunningLocked()
+		dls.restartKickerLocked()
 	}
 
 	// Fast path: already have it
@@ -1006,22 +1006,25 @@ func (dls *Downloaders) StopAll() {
 	dls.mu.Unlock()
 }
 
-// ensureKickerRunningLocked restarts the kicker goroutine if it has stopped.
+// restartKickerLocked starts a fresh kicker after the session went idle.
 // Caller must hold dls.mu. Refuses to start a new kicker while the session
 // is closed or being torn down — that would race against StopAll()/Close()
 // waiting on the previous kicker's exit sentinel.
-func (dls *Downloaders) ensureKickerRunningLocked() {
+//
+// It must not check whether the old kicker has exited yet: idle=true is set
+// by checkIdleTimeout (after which the old kicker is committed to returning)
+// or by StopAll (which cancels its ctx). The old kicker closes kickerDone only
+// after checkIdleTimeout releases mu, so a read landing in that gap used to
+// see kickerDone still open, start nothing, and leave the session with no
+// kicker at all — the idle timeout then never ran again and the stream stayed
+// on the Stats page for hours while a client held the file open. Each kicker
+// owns its own done channel, so briefly overlapping with the exiting one is
+// harmless.
+func (dls *Downloaders) restartKickerLocked() {
 	if dls.closed || dls.stopping {
 		return
 	}
-	// Check if kicker has exited (non-blocking check)
-	select {
-	case <-dls.kickerDone:
-		// Kicker has exited, need to restart it
-		dls.startKicker()
-	default:
-		// Kicker still running
-	}
+	dls.startKicker()
 }
 
 func (dls *Downloaders) currentKickerInterval() time.Duration {
