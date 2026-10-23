@@ -10,7 +10,9 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"time"
 
+	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -19,6 +21,12 @@ import (
 
 const (
 	streamBufferSize = 256 * 1024
+
+	// staleStreamTTL is how long a DFS stream may go without any read or
+	// download activity before GetActiveStreams treats it as leaked. DFS
+	// untracks a stream after 30s idle, and every read and downloaded chunk
+	// refreshes LastActive, so a live DFS stream never gets close to this.
+	staleStreamTTL = 5 * time.Minute
 )
 
 // streamBufPool provides reusable buffers for streaming to reduce GC pressure.
@@ -32,16 +40,16 @@ var streamBufPool = sync.Pool{
 
 // ActiveStream represents a currently active streaming file
 type ActiveStream struct {
-	ID            string           `json:"id"`
-	EntryName     string           `json:"entry_name"`
-	FileName      string           `json:"file_name"`
-	FileSize      int64            `json:"file_size"`
-	Source        string           `json:"source"` // "torrent" or "nzb"
-	StartedAt     int64            `json:"started_at"`
-	LastActive    int64            `json:"last_active"` // Last activity timestamp (for observability)
-	Debrid        string           `json:"debrid,omitempty"`
-	Client        string           `json:"client,omitempty"` // Client identifier (User-Agent for WebDAV, "DFS" for DFS)
-	CliDebridIDs  map[string]int64 `json:"cli_debrid_ids,omitempty"`
+	ID           string           `json:"id"`
+	EntryName    string           `json:"entry_name"`
+	FileName     string           `json:"file_name"`
+	FileSize     int64            `json:"file_size"`
+	Source       string           `json:"source"` // "torrent" or "nzb"
+	StartedAt    int64            `json:"started_at"`
+	LastActive   int64            `json:"last_active"` // Last activity timestamp (for observability)
+	Debrid       string           `json:"debrid,omitempty"`
+	Client       string           `json:"client,omitempty"` // Client identifier (User-Agent for WebDAV, "DFS" for DFS)
+	CliDebridIDs map[string]int64 `json:"cli_debrid_ids,omitempty"`
 }
 
 // === Active Streams Tracking ===
@@ -77,14 +85,67 @@ func (m *Manager) unregisterStream(streamID string) {
 	m.activeStreams.Delete(streamID)
 }
 
-// GetActiveStreams returns all currently active streams.
+// touchStream refreshes LastActive on a registered stream and returns it. It
+// never creates an entry: the plain Load+Store it replaces raced
+// unregisterStream, so a downloader write landing between the two re-inserted
+// a just-untracked stream that nothing would ever remove, leaving it on the
+// Stats page indefinitely.
+func (m *Manager) touchStream(streamID string) (*ActiveStream, bool) {
+	now := utils.NowUnix()
+	return m.activeStreams.Compute(streamID, func(old *ActiveStream, loaded bool) (*ActiveStream, xsync.ComputeOp) {
+		if !loaded || old == nil || old.LastActive == now {
+			return old, xsync.CancelOp
+		}
+		updated := *old
+		updated.LastActive = now
+		return &updated, xsync.UpdateOp
+	})
+}
+
+// isStaleStream reports whether a DFS stream has had no activity since cutoff.
+// Other clients are never stale: WebDAV torrent reads don't refresh
+// LastActive, so a long-running WebDAV GET would look idle while live.
+func isStaleStream(stream *ActiveStream, cutoff int64) bool {
+	return stream != nil && stream.Client == "DFS" && stream.LastActive < cutoff
+}
+
+// GetActiveStreams returns all currently active streams, dropping DFS entries
+// that have gone silent for staleStreamTTL — a backstop so a registration that
+// escaped untracking can't sit on the Stats page forever.
 func (m *Manager) GetActiveStreams() []*ActiveStream {
+	cutoff := utils.NowUnix() - int64(staleStreamTTL/time.Second)
 	var streams []*ActiveStream
-	m.activeStreams.Range(func(_ string, stream *ActiveStream) bool {
+	m.activeStreams.Range(func(id string, stream *ActiveStream) bool {
+		if isStaleStream(stream, cutoff) {
+			m.pruneStaleStream(id, cutoff)
+			return true
+		}
 		streams = append(streams, stream)
 		return true
 	})
 	return streams
+}
+
+// pruneStaleStream removes id if it is still stale, re-checking under the map's
+// bucket lock so a stream that was just re-registered or touched survives.
+func (m *Manager) pruneStaleStream(id string, cutoff int64) {
+	var pruned *ActiveStream
+	m.activeStreams.Compute(id, func(old *ActiveStream, loaded bool) (*ActiveStream, xsync.ComputeOp) {
+		if !loaded || !isStaleStream(old, cutoff) {
+			return old, xsync.CancelOp
+		}
+		pruned = old
+		return old, xsync.DeleteOp
+	})
+	if pruned == nil {
+		return
+	}
+	m.logger.Warn().
+		Str("entry", pruned.EntryName).
+		Str("file", pruned.FileName).
+		Str("idle", (time.Duration(utils.NowUnix()-pruned.LastActive) * time.Second).String()).
+		Msg("Dropped stale active stream that was never untracked")
+	m.NotifyInteractiveStreamCount()
 }
 
 // GetActiveStreamsCount returns the number of active streams.
@@ -194,10 +255,15 @@ func (m *Manager) TrackStream(entry *storage.Entry, filename, client string) str
 	// Attach cli_debrid_ids directly from the entry so the stats endpoint
 	// doesn't need a separate lookup and handles both NZB and debrid entries.
 	if streamID != "" && len(entry.CliDebridIDs) > 0 {
-		if s, ok := m.activeStreams.Load(streamID); ok {
-			s.CliDebridIDs = entry.CliDebridIDs
-			m.activeStreams.Store(streamID, s)
-		}
+		ids := entry.CliDebridIDs
+		m.activeStreams.Compute(streamID, func(old *ActiveStream, loaded bool) (*ActiveStream, xsync.ComputeOp) {
+			if !loaded || old == nil {
+				return old, xsync.CancelOp
+			}
+			updated := *old
+			updated.CliDebridIDs = ids
+			return &updated, xsync.UpdateOp
+		})
 	}
 
 	if streamID != "" {
