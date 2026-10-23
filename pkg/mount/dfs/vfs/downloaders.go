@@ -127,13 +127,21 @@ func (dls *Downloaders) RecordPlaybackActivity(bytesRead, off, readSize, fileSiz
 	if dls == nil || dls.manager == nil || bytesRead <= 0 {
 		return
 	}
-	dls.mu.Lock()
-	streamID := dls.streamID
-	dls.mu.Unlock()
+	streamID := dls.currentStreamID()
 	if streamID == "" {
 		return
 	}
 	dls.manager.RecordStreamActivity(streamID, bytesRead, 0, isProbeRead(off, readSize, fileSize))
+}
+
+// currentStreamID returns the active stream registration ID, or "" when the
+// session is untracked. Downloader goroutines keep writing after an idle or
+// StopAll untrack, so they must read the ID under mu rather than racing the
+// clear.
+func (dls *Downloaders) currentStreamID() string {
+	dls.mu.Lock()
+	defer dls.mu.Unlock()
+	return dls.streamID
 }
 
 // ensureStreamTrackedLocked makes sure the active stream is registered when
@@ -1473,7 +1481,7 @@ func (w *cacheWriter) Write(p []byte) (int, error) {
 	w.written += actuallyWritten
 
 	if n > 0 && w.dl.dls.manager != nil {
-		w.dl.dls.manager.RecordStreamActivity(w.dl.dls.streamID, int64(n), actuallyWritten, w.dl.dls.interactiveProbe.Load())
+		w.dl.dls.manager.RecordStreamActivity(w.dl.dls.currentStreamID(), int64(n), actuallyWritten, w.dl.dls.interactiveProbe.Load())
 	}
 	if actuallyWritten > 0 {
 		w.dl.dls.item.cache.AddDownloadedBytes(actuallyWritten)
