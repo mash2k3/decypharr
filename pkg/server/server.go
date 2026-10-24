@@ -385,9 +385,18 @@ func (s *Server) handleShareLogs(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Gzip compress
+	// Gzip compress, leading with a /debug/stats snapshot (account identifiers
+	// removed) so library size, repair counts, mount and pool state come with
+	// every shared log without asking for them separately.
 	var buf bytes.Buffer
 	gz, _ := gzip.NewWriterLevel(&buf, gzip.BestCompression)
+	if statsJSON, err := s.stats.ShareJSON(); err == nil {
+		fmt.Fprintf(gz, "===== /debug/stats snapshot (%s) =====\n", time.Now().Format(time.RFC3339))
+		gz.Write(statsJSON)
+		gz.Write([]byte("\n===== end /debug/stats =====\n\n"))
+	} else {
+		s.logger.Warn().Err(err).Msg("Share logs: could not include /debug/stats snapshot")
+	}
 	for _, l := range lines {
 		gz.Write([]byte(l))
 		gz.Write([]byte("\n"))

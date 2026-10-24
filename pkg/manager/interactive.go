@@ -231,18 +231,21 @@ func (m *InteractiveMonitor) Active() bool {
 
 // RecordStreamActivity updates LastActive and records qualifying bytes for a tracked stream.
 func (m *Manager) RecordStreamActivity(streamID string, totalBytes, newBytes int64, probe bool) {
-	if m == nil || m.interactive == nil {
+	if m == nil {
 		return
 	}
+	// Refresh LastActive even without the interactive monitor (no usenet
+	// configured): the Stats page's stale-stream backstop relies on it.
 	var meta reserveStreamMeta
-	protected := false
 	if streamID != "" {
-		if s, ok := m.activeStreams.Load(streamID); ok && s != nil {
-			s.LastActive = utils.NowUnix()
-			m.activeStreams.Store(streamID, s)
+		if s, ok := m.touchStream(streamID); ok {
 			meta = reserveStreamMeta{Entry: s.EntryName, File: s.FileName, Client: s.Client}
 		}
 	}
+	if m.interactive == nil {
+		return
+	}
+	protected := false
 	if m.interactiveProtectionEnabled() {
 		if !m.plexCredentialsConfigured() {
 			return
