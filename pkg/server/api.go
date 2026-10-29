@@ -1216,6 +1216,17 @@ type syncEntry struct {
 	CliDebridIDs     map[string]int64 `json:"cli_debrid_ids,omitempty"`
 }
 
+// syncChangesPage is returned only when the caller opts into pagination.
+// Keeping the legacy bare-array response for requests without page/limit
+// avoids breaking older cli_debrid releases.
+type syncChangesPage struct {
+	Changes []syncEntry `json:"changes"`
+	Page    int         `json:"page"`
+	Limit   int         `json:"limit"`
+	Total   int         `json:"total"`
+	HasMore bool        `json:"has_more"`
+}
+
 // handleSyncChanges returns entries updated since a given Unix timestamp.
 // CLI polls this every few minutes to sync filled_by_torrent_id,
 // filled_by_magnet, debrid_folder_name, original_scraped_torrent_title,
@@ -1224,6 +1235,8 @@ type syncEntry struct {
 // Query params:
 //
 //	since=<unix_timestamp>  only return entries updated after this time (0 = all)
+//	page=<number>           opt into a paged response (default 1)
+//	limit=<number>          entries per page (default 250, maximum 500)
 func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 	var since time.Time
 	if sinceStr := r.URL.Query().Get("since"); sinceStr != "" {
@@ -1235,9 +1248,35 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 	// Delta syncs (since > 0) have few entries so segment lookup is fast.
 	fullSync := since.IsZero()
 
+	// A full library can contain tens of thousands of files. The old endpoint
+	// built one response containing every entry and every file, while
+	// cli_debrid simultaneously decoded the same payload. In an all-in-one
+	// container such as DUMB, both peaks count against one cgroup and can cause
+	// an OOM kill. Pagination is opt-in so old clients retain their response
+	// contract while current clients keep both sides' working set bounded.
+	pageRaw := r.URL.Query().Get("page")
+	limitRaw := r.URL.Query().Get("limit")
+	paged := pageRaw != "" || limitRaw != ""
+	page, err := strconv.Atoi(pageRaw)
+	if err != nil || page < 1 {
+		page = 1
+	}
+	limit, err := strconv.Atoi(limitRaw)
+	if err != nil || limit < 1 {
+		limit = 250
+	} else if limit > 500 {
+		limit = 500
+	}
+	offset := (page - 1) * limit
+
 	var changes []syncEntry
+	total := 0
 	_ = s.manager.Storage().ForEach(func(entry *storage.Entry) error {
 		if !since.IsZero() && !entry.UpdatedAt.After(since) {
+			return nil
+		}
+		total++
+		if paged && (total <= offset || len(changes) >= limit) {
 			return nil
 		}
 
@@ -1280,12 +1319,26 @@ func (s *Server) handleSyncChanges(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info().
 		Int("count", len(changes)).
+		Int("total", total).
+		Int("page", page).
+		Int("limit", limit).
+		Bool("paged", paged).
 		Bool("full_sync", fullSync).
 		Int64("since", since.Unix()).
 		Msg("Sync changes requested")
 
 	if changes == nil {
 		changes = []syncEntry{}
+	}
+	if paged {
+		utils.JSONResponse(w, syncChangesPage{
+			Changes: changes,
+			Page:    page,
+			Limit:   limit,
+			Total:   total,
+			HasMore: offset+len(changes) < total,
+		}, http.StatusOK)
+		return
 	}
 	utils.JSONResponse(w, changes, http.StatusOK)
 }
