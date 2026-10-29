@@ -4,13 +4,14 @@ import (
 	"bytes"
 	"cmp"
 	"context"
+	stdjson "encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"strings"
 	"sync"
 
-	json "github.com/bytedance/sonic"
+	sonic "github.com/bytedance/sonic"
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
@@ -95,7 +96,7 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload i
 
 	var body io.Reader
 	if payload != nil {
-		data, err := json.Marshal(payload)
+		data, err := sonic.Marshal(payload)
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal payload: %w", err)
 		}
@@ -115,12 +116,15 @@ func (a *Arr) RequestCtx(ctx context.Context, method, endpoint string, payload i
 		return nil, err
 	}
 
-	// Parse success result if provided. Stream-decode directly from the
-	// response body so large payloads (e.g. full Sonarr series lists) don't
-	// sit on the heap as raw bytes alongside the decoded object graph.
+	// Parse success results directly from the response body. Do not use
+	// sonic's streaming decoder here: it repeatedly grows and copies its
+	// scratch buffer as large Arr responses arrive in small network reads. A
+	// single multi-megabyte Sonarr library response can otherwise allocate
+	// gigabytes and OOM the shared DUMB container. The standard decoder keeps
+	// this path linear and gives decoded strings their own bounded lifetime.
 	if res != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		defer resp.Body.Close()
-		dec := json.ConfigDefault.NewDecoder(resp.Body)
+		dec := stdjson.NewDecoder(resp.Body)
 		if err := dec.Decode(res); err != nil && err != io.EOF {
 			return resp, fmt.Errorf("failed to decode response: %w", err)
 		}
