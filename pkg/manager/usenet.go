@@ -70,8 +70,16 @@ func (m *Manager) AddNewNZB(ctx context.Context, req *ImportRequest) (string, er
 	job := NewJob(JobTypeNZB, req)
 	job.ID = entry.InfoHash
 	job.Entry = entry
-	job.NZBMeta = meta
-	job.NZBGroups = groups
+	if m.jobQueue != nil && m.jobQueue.Backlogged() {
+		// Don't hold the parsed NZB (and its raw content) for however long
+		// the backlog takes to drain; a large import burst grew memory
+		// without bound. The worker re-parses from the saved source.
+		job.Request = nil
+		job.DeferredNZB = true
+	} else {
+		job.NZBMeta = meta
+		job.NZBGroups = groups
+	}
 	if err := m.SubmitJob(job); err != nil {
 		entry.MarkAsError(err)
 		_ = m.queue.Update(entry)
@@ -86,6 +94,17 @@ func (m *Manager) processNZBJob(ctx context.Context, job *Job) error {
 	}
 	if _, err := m.queue.GetTorrent(job.Entry.InfoHash); err != nil {
 		return nil
+	}
+	if job.DeferredNZB {
+		rebuilt, err := m.rebuildQueuedNZBJob(ctx, job.Entry)
+		if err != nil {
+			return err
+		}
+		_ = m.queue.Update(job.Entry)
+		job.Request = rebuilt.Request
+		job.NZBMeta = rebuilt.NZBMeta
+		job.NZBGroups = rebuilt.NZBGroups
+		job.DeferredNZB = false
 	}
 	if job.NZBMeta == nil {
 		if job.Request == nil {

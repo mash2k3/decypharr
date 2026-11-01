@@ -307,7 +307,7 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 	if job == nil {
 		return
 	}
-	if job.Entry != nil && job.Request == nil && job.DebridTorrent == nil && job.NZBMeta == nil && !job.ResumeExisting {
+	if job.Entry != nil && job.Request == nil && job.DebridTorrent == nil && job.NZBMeta == nil && !job.ResumeExisting && !job.DeferredNZB {
 		m.waitForDownloadCompletion(ctx, job.Entry)
 		return
 	}

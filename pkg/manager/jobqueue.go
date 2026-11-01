@@ -33,6 +33,7 @@ type Job struct {
 	NZBGroups      map[string]*parser.FileGroup // NZB file groups parsed before the active-download gate
 	Entry          *storage.Entry               // Entry created during processing
 	ResumeExisting bool                         // Continue an already persisted provider placement
+	DeferredNZB    bool                         // NZB is parsed by the worker, not held parsed while queued
 	CreatedAt      time.Time
 }
 
@@ -121,6 +122,14 @@ func (q *JobQueue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.jobs)
+}
+
+// Backlogged reports whether at least a full worker pool's worth of jobs is
+// already waiting, i.e. a newly submitted job will not start soon.
+func (q *JobQueue) Backlogged() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.jobs) >= q.maxWorkers
 }
 
 // ActiveCount returns the number of jobs currently holding an active-download slot.

@@ -79,3 +79,34 @@ func TestRunJobRecoversPanic(t *testing.T) {
 		t.Fatal("processFunc was never invoked")
 	}
 }
+
+// AddNewNZB only drops a job's parsed NZB when the queue already has a full
+// worker pool's worth of jobs waiting; below that the job starts soon and
+// re-parsing it in the worker would be wasted NNTP work.
+func TestJobQueueBacklogged(t *testing.T) {
+	block := make(chan struct{})
+	q := NewJobQueue(context.Background(), 2, func(_ context.Context, _ *Job) { <-block })
+	defer q.Close()
+	defer close(block)
+
+	// Two jobs occupy both workers; wait until neither is still pending.
+	_ = q.Submit(&Job{ID: "a"})
+	_ = q.Submit(&Job{ID: "b"})
+	deadline := time.After(2 * time.Second)
+	for q.ActiveCount() < 2 {
+		select {
+		case <-deadline:
+			t.Fatal("workers never picked up the first two jobs")
+		case <-time.After(5 * time.Millisecond):
+		}
+	}
+
+	_ = q.Submit(&Job{ID: "c"})
+	if q.Backlogged() {
+		t.Fatal("1 pending job with 2 workers should not count as backlogged")
+	}
+	_ = q.Submit(&Job{ID: "d"})
+	if !q.Backlogged() {
+		t.Fatal("2 pending jobs with 2 workers should count as backlogged")
+	}
+}
