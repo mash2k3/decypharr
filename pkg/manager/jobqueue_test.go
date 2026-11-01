@@ -110,3 +110,34 @@ func TestJobQueueBacklogged(t *testing.T) {
 		t.Fatal("2 pending jobs with 2 workers should count as backlogged")
 	}
 }
+
+// Popped and deleted jobs must not stay reachable through the queue's
+// backing array: workers attach each job's parsed NZB to it, so a retained
+// slot kept every processed NZB in memory for as long as the array lived.
+func TestJobQueueReleasesPoppedAndDeletedJobs(t *testing.T) {
+	q := &JobQueue{jobs: []*Job{{ID: "a"}, {ID: "b"}, {ID: "c"}, {ID: "d"}}}
+	q.cond = sync.NewCond(&q.mu)
+	backing := q.jobs
+
+	if job := q.pop(); job == nil || job.ID != "a" {
+		t.Fatalf("pop() = %#v, want a", job)
+	}
+	if backing[0] != nil {
+		t.Fatal("popped job is still referenced by the backing array")
+	}
+
+	if !q.DeleteJob("c") {
+		t.Fatal("DeleteJob(c) = false")
+	}
+	for i, job := range backing {
+		if job != nil && job.ID == "c" {
+			t.Fatalf("deleted job still referenced at backing[%d]", i)
+		}
+	}
+	if len(q.jobs) != 2 || q.jobs[0].ID != "b" || q.jobs[1].ID != "d" {
+		t.Fatalf("remaining jobs = %v, want [b d]", q.jobs)
+	}
+	if backing[3] != nil {
+		t.Fatal("DeleteJob left a duplicate pointer in the vacated tail slot")
+	}
+}

@@ -221,6 +221,12 @@ func (q *JobQueue) pop() *Job {
 	}
 
 	job := q.jobs[0]
+	// Clear the slot: reslicing alone leaves the backing array pointing at
+	// every popped job until an append reallocates it. Workers fill a job
+	// with its parsed NZB, groups and raw content, so with a large queue
+	// each processed NZB stayed reachable (~16 MB each for remuxes) and
+	// memory grew with every job completed.
+	q.jobs[0] = nil
 	q.jobs = q.jobs[1:]
 	return job
 }
@@ -233,7 +239,10 @@ func (q *JobQueue) DeleteJob(jobID string) bool {
 
 	for i, job := range q.jobs {
 		if job.ID == jobID {
-			q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+			last := len(q.jobs) - 1
+			copy(q.jobs[i:], q.jobs[i+1:])
+			q.jobs[last] = nil
+			q.jobs = q.jobs[:last]
 			return true
 		}
 	}
