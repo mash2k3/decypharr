@@ -108,8 +108,7 @@ func (m *Manager) processNZBJob(ctx context.Context, job *Job) error {
 	}
 	if job.NZBMeta == nil {
 		if job.Request == nil {
-			m.waitForDownloadCompletion(ctx, job.Entry)
-			return nil
+			return fmt.Errorf("NZB job has no request or processing payload")
 		}
 		return fmt.Errorf("parsed NZB metadata missing")
 	}

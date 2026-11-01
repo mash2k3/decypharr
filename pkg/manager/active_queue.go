@@ -20,26 +20,22 @@ func (m *Manager) restoreActiveDownloadJobs() {
 		return entries[i].AddedOn.Before(entries[j].AddedOn)
 	})
 
-	// nzbNeedsReprocessing decodes the NZB's .meta; do it once per entry.
-	reprocess := make(map[string]bool, len(entries))
+	// Clear flags left by interrupted local processing. Nothing is in flight in
+	// a fresh process, so a persisted IsDownloading was written by a run that
+	// died mid-symlink, and processQueuedEntries skips flagged entries forever.
+	// Active downloads stay with processQueuedEntries; only unfinished imports
+	// get workers. Restore used to also give every active download a worker
+	// that waited for it to finish, so a few stale entries held the whole pool
+	// and no import ran again.
 	for _, entry := range entries {
-		reprocess[entry.InfoHash] = m.nzbNeedsReprocessing(entry)
-	}
-
-	// Existing active downloads reserve slots before queued imports are resumed.
-	for _, entry := range entries {
-		if entry.Status == debridTypes.TorrentStatusQueued || reprocess[entry.InfoHash] {
-			continue
+		if entry.IsDownloading {
+			entry.IsDownloading = false
+			if err := m.queue.Update(entry); err != nil {
+				m.logger.Error().Err(err).Str("entry_id", entry.InfoHash).Msg("Failed to reset restored download")
+				continue
+			}
 		}
-		_ = m.SubmitJob(&Job{
-			ID:    entry.InfoHash,
-			Type:  jobTypeForEntry(entry),
-			Entry: entry,
-		})
-	}
-
-	for _, entry := range entries {
-		if entry.Status != debridTypes.TorrentStatusQueued && !reprocess[entry.InfoHash] {
+		if entry.Status != debridTypes.TorrentStatusQueued && !m.nzbNeedsReprocessing(entry) {
 			continue
 		}
 		if entry.IsNZB() && m.usenet != nil {
@@ -76,13 +72,6 @@ func (m *Manager) restoreActiveDownloadJobs() {
 			_ = m.queue.Update(entry)
 		}
 	}
-}
-
-func jobTypeForEntry(entry *storage.Entry) JobType {
-	if entry != nil && entry.IsNZB() {
-		return JobTypeNZB
-	}
-	return JobTypeTorrent
 }
 
 func (m *Manager) nzbNeedsReprocessing(entry *storage.Entry) bool {

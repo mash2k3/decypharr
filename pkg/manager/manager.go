@@ -307,11 +307,6 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 	if job == nil {
 		return
 	}
-	if job.Entry != nil && job.Request == nil && job.DebridTorrent == nil && job.NZBMeta == nil && !job.ResumeExisting && !job.DeferredNZB {
-		m.waitForDownloadCompletion(ctx, job.Entry)
-		return
-	}
-
 	var err error
 	switch job.Type {
 	case JobTypeTorrent:
@@ -341,27 +336,11 @@ func (m *Manager) processJob(ctx context.Context, job *Job) {
 		}
 		return
 	}
-
-	m.waitForDownloadCompletion(ctx, job.Entry)
-}
-
-func (m *Manager) waitForDownloadCompletion(ctx context.Context, entry *storage.Entry) {
-	if entry == nil {
-		return
-	}
-	ticker := time.NewTicker(time.Second)
-	defer ticker.Stop()
-	for {
-		current, err := m.queue.GetTorrent(entry.InfoHash)
-		if err != nil || current.State != storage.EntryStateDownloading {
-			return
-		}
-		select {
-		case <-ctx.Done():
-			return
-		case <-ticker.C:
-		}
-	}
+	// The worker slot is released as soon as the job is handed off. Waiting
+	// here until the entry left the downloading state parked a worker for the
+	// whole post-download lifecycle, including the symlink action's mount
+	// wait, so a handful of slow imports stalled every job behind them.
+	// processQueuedEntries drives the entry from here.
 }
 
 func (m *Manager) migrate() {
