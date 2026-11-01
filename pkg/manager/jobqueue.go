@@ -33,6 +33,7 @@ type Job struct {
 	NZBGroups      map[string]*parser.FileGroup // NZB file groups parsed before the active-download gate
 	Entry          *storage.Entry               // Entry created during processing
 	ResumeExisting bool                         // Continue an already persisted provider placement
+	DeferredNZB    bool                         // NZB is parsed by the worker, not held parsed while queued
 	CreatedAt      time.Time
 }
 
@@ -121,6 +122,14 @@ func (q *JobQueue) Len() int {
 	q.mu.Lock()
 	defer q.mu.Unlock()
 	return len(q.jobs)
+}
+
+// Backlogged reports whether at least a full worker pool's worth of jobs is
+// already waiting, i.e. a newly submitted job will not start soon.
+func (q *JobQueue) Backlogged() bool {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+	return len(q.jobs) >= q.maxWorkers
 }
 
 // ActiveCount returns the number of jobs currently holding an active-download slot.
@@ -212,6 +221,12 @@ func (q *JobQueue) pop() *Job {
 	}
 
 	job := q.jobs[0]
+	// Clear the slot: reslicing alone leaves the backing array pointing at
+	// every popped job until an append reallocates it. Workers fill a job
+	// with its parsed NZB, groups and raw content, so with a large queue
+	// each processed NZB stayed reachable (~16 MB each for remuxes) and
+	// memory grew with every job completed.
+	q.jobs[0] = nil
 	q.jobs = q.jobs[1:]
 	return job
 }
@@ -224,7 +239,10 @@ func (q *JobQueue) DeleteJob(jobID string) bool {
 
 	for i, job := range q.jobs {
 		if job.ID == jobID {
-			q.jobs = append(q.jobs[:i], q.jobs[i+1:]...)
+			last := len(q.jobs) - 1
+			copy(q.jobs[i:], q.jobs[i+1:])
+			q.jobs[last] = nil
+			q.jobs = q.jobs[:last]
 			return true
 		}
 	}
