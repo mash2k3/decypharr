@@ -80,13 +80,28 @@ func getGroupsList(groups map[string]struct{}) []string {
 func determineNZBName(filename string, meta map[string]string) string {
 	// Prefer filename if it exists
 	if filename != "" {
-		filename = strings.TrimSuffix(filename, filepath.Ext(filename))
+		filename = trimNZBExtension(filename)
 	} else if name := meta["Name"]; name != "" {
 		filename = name
 	} else if title := meta["title"]; title != "" {
 		filename = title
 	}
 	return utils.RemoveInvalidChars(filename)
+}
+
+// trimNZBExtension drops a trailing .nzb (or .nzb.gz) and nothing else. Release
+// names are full of dots, so stripping filepath.Ext cut the last word off any
+// name passed in without .nzb: a re-parse of a queued job feeds back the
+// already-trimmed name, and each one lost another word ("Batman.The.Long" ->
+// "Batman.The").
+func trimNZBExtension(name string) string {
+	lower := strings.ToLower(name)
+	for _, ext := range []string{".nzb.gz", ".nzb"} {
+		if strings.HasSuffix(lower, ext) {
+			return name[:len(name)-len(ext)]
+		}
+	}
+	return name
 }
 
 func determineExtension(group *FileGroup) string {
