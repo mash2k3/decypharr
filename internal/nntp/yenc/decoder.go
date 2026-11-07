@@ -63,6 +63,7 @@ type pureGoYencDecoder struct {
 	outPos   int
 	scratch  []byte // reused buffer for lines longer than the bufio buffer (rare)
 	sawBegin bool
+	sawEnd   bool
 	done     bool
 }
 
@@ -183,6 +184,13 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 		}
 	}
 
+	// Past =yend only the NNTP terminator remains. Keep reading until it so the
+	// shared connection reader is left at the next response; stopping at =yend
+	// left ".\r\n" behind and the next command parsed "." as its status line.
+	if d.sawEnd {
+		return false, nil
+	}
+
 	switch {
 	case bytes.HasPrefix(line, []byte("=ybegin ")):
 		d.sawBegin = true
@@ -193,7 +201,8 @@ func (d *pureGoYencDecoder) processLine(line []byte) (bool, error) {
 		return false, nil
 	case bytes.HasPrefix(line, []byte("=yend ")):
 		parseYEndLine(line, d.meta)
-		return true, nil
+		d.sawEnd = true
+		return false, nil
 	}
 
 	if !d.sawBegin {

@@ -1,6 +1,7 @@
 package yenc
 
 import (
+	"bufio"
 	"bytes"
 	"fmt"
 	"io"
@@ -203,5 +204,62 @@ func TestDecoder_NNTPTerminator(t *testing.T) {
 	}
 	if !bytes.Equal(decoded, original) {
 		t.Errorf("Decoded data mismatch\n  got:  %q\n  want: %q", decoded, original)
+	}
+}
+
+// TestDecoder_ConsumesNNTPTerminatorOnSharedReader reproduces connection reuse:
+// the decoder reads from the connection's long-lived bufio.Reader, so after an
+// article it must leave nothing behind. Stopping at =yend left ".\r\n" on the
+// reader and the next command read "." as its response code ("invalid
+// response code: ."). The server sends nothing after the terminator until the
+// next command, so the stream ends there.
+func TestDecoder_ConsumesNNTPTerminatorOnSharedReader(t *testing.T) {
+	for _, pureGo := range []bool{false, true} {
+		t.Run(fmt.Sprintf("pureGo=%v", pureGo), func(t *testing.T) {
+			original := UsePureGo
+			UsePureGo = pureGo
+			defer func() { UsePureGo = original }()
+
+			payload := []byte("article payload")
+			stream := yencEncode(payload, "a.bin", 0, 0, 0) + ".\r\n"
+			shared := bufio.NewReaderSize(strings.NewReader(stream), 256*1024)
+
+			dec := AcquireDecoder(shared)
+			got, err := io.ReadAll(dec)
+			ReleaseDecoder(dec)
+			if err != nil {
+				t.Fatalf("read failed: %v", err)
+			}
+			if !bytes.Equal(got, payload) {
+				t.Fatalf("got %q, want %q", got, payload)
+			}
+			if rest, _ := io.ReadAll(shared); len(rest) != 0 {
+				t.Fatalf("bytes left on the connection reader: %q", rest)
+			}
+		})
+	}
+}
+
+func BenchmarkDecoder_Article(b *testing.B) {
+	payload := make([]byte, 750*1024)
+	for i := range payload {
+		payload[i] = byte(i*7 + i>>8)
+	}
+	encoded := []byte(yencEncode(payload, "bench.bin", 0, 0, 0) + ".\r\n")
+	for _, pureGo := range []bool{false, true} {
+		b.Run(fmt.Sprintf("pureGo=%v", pureGo), func(b *testing.B) {
+			original := UsePureGo
+			UsePureGo = pureGo
+			defer func() { UsePureGo = original }()
+			b.SetBytes(int64(len(payload)))
+			b.ReportAllocs()
+			for b.Loop() {
+				dec := AcquireDecoder(bytes.NewReader(encoded))
+				if _, err := io.Copy(io.Discard, dec); err != nil {
+					b.Fatal(err)
+				}
+				ReleaseDecoder(dec)
+			}
+		})
 	}
 }
