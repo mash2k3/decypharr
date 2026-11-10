@@ -22,6 +22,7 @@ Usenet streaming.
 - [Debrid Link](https://debrid-link.com)
 - [All Debrid](https://alldebrid.com)
 - [Premiumize](https://www.premiumize.me)
+- [HighWay](https://high-way.me)
 
 ## Quick Start
 
