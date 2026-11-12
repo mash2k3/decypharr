@@ -379,7 +379,7 @@ func verifySymlinkFileReady(path string) error {
 		return fmt.Errorf("symlink target is a directory")
 	}
 
-	f, err := os.Open(path)
+	f, err := openOnOwnMount(path)
 	if err != nil {
 		return fmt.Errorf("symlink target cannot be opened: %w", err)
 	}

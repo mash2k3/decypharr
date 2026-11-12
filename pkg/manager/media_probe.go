@@ -91,7 +91,7 @@ func probeMountedHeader(ctx context.Context, path string) mediaProbeResult {
 	// probe gives up on it when ctx ends.
 	done := make(chan readResult, 1)
 	go func() {
-		f, err := os.Open(path)
+		f, err := openOnOwnMount(path)
 		if err != nil {
 			done <- readResult{err: err}
 			return
@@ -119,7 +119,7 @@ func probeMountedHeader(ctx context.Context, path string) mediaProbeResult {
 }
 
 func readMountedMediaRanges(ctx context.Context, path string) error {
-	f, err := os.Open(path)
+	f, err := openOnOwnMount(path)
 	if err != nil {
 		return err
 	}
