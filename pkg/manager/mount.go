@@ -3,7 +3,6 @@ package manager
 import (
 	"context"
 	"io"
-	"os"
 	"strings"
 	"time"
 
@@ -96,7 +95,7 @@ func (m *Manager) WarmFileCache(filePaths []string) error {
 // warmOneFile reads the head and (for large enough files) the tail of path,
 // going through the mount so the FUSE/VFS cache is populated.
 func (m *Manager) warmOneFile(ctx context.Context, path string) error {
-	f, err := os.Open(path)
+	f, err := openOnOwnMount(path)
 	if err != nil {
 		return err
 	}
