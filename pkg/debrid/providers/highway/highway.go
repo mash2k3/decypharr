@@ -3,6 +3,7 @@ package highway
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -140,7 +141,7 @@ func (hw *Highway) do(client *request.Client, req *http.Request, out any) error 
 	if client == nil {
 		client = hw.client
 	}
-	resp, err := client.DoJSON(req, out)
+	resp, err := doJSON(client, req, out)
 	if err != nil {
 		return err
 	}
@@ -158,6 +159,25 @@ func (hw *Highway) do(client *request.Client, req *http.Request, out any) error 
 	}
 }
 
+// doJSON sends req and decodes a 2xx JSON body into out (cli_mount's request
+// package has no DoJSON helper; this mirrors upstream's).
+func doJSON(client *request.Client, req *http.Request, out any) (*http.Response, error) {
+	resp, err := client.Do(req)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+	}()
+	if out != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
+		if err := json.NewDecoder(resp.Body).Decode(out); err != nil && !errors.Is(err, io.EOF) {
+			return resp, err
+		}
+	}
+	return resp, nil
+}
+
 func (hw *Highway) get(ctx context.Context, client *request.Client, query url.Values, out any) error {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, hw.endpoint(query), nil)
 	if err != nil {
@@ -168,7 +188,20 @@ func (hw *Highway) get(ctx context.Context, client *request.Client, query url.Va
 
 // ------------------------------------------------------------------------------------ Availability
 
-func (hw *Highway) IsAvailable(hashes []string) (map[string]bool, error) {
+// IsAvailable matches cli_mount's Client interface (no error return). A failed
+// check is logged and the hashes it covered are left out of the map, so callers
+// see "unknown", not "not cached".
+func (hw *Highway) IsAvailable(hashes []string) map[string]bool {
+	result, err := hw.checkAvailable(hashes)
+	if err != nil {
+		hw.logger.Warn().Err(err).Msg("HighWay availability check failed")
+	}
+	return result
+}
+
+// checkAvailable is upstream's IsAvailable: it stops at the first failed batch
+// and reports the error.
+func (hw *Highway) checkAvailable(hashes []string) (map[string]bool, error) {
 	result := make(map[string]bool, len(hashes))
 	valid := make([]string, 0, len(hashes))
 	for _, hash := range hashes {
@@ -201,12 +234,12 @@ func (hw *Highway) IsAvailable(hashes []string) (map[string]bool, error) {
 
 func (hw *Highway) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 	if !torrent.DownloadUncached && torrent.InfoHash != "" {
-		available, err := hw.IsAvailable([]string{torrent.InfoHash})
+		available, err := hw.checkAvailable([]string{torrent.InfoHash})
 		if err != nil {
 			return nil, err
 		}
 		if !available[torrent.InfoHash] {
-			return nil, fmt.Errorf("torrent %s: %w", torrent.Name, customerror.TorrentNotCachedError)
+			return nil, fmt.Errorf("torrent: %s not cached", torrent.Name)
 		}
 	}
 
@@ -343,7 +376,7 @@ func (hw *Highway) apply(t *types.Torrent, data *transfer, withFiles bool) {
 		if f.Partial {
 			continue
 		}
-		if err := cfg.ValidateFileAllowed(f.Path, f.Size); err != nil {
+		if err := cfg.IsFileAllowed(f.Path, f.Size); err != nil {
 			continue
 		}
 		name := path.Base(f.Path)
@@ -404,7 +437,7 @@ func (hw *Highway) CheckStatus(torrent *types.Torrent) (*types.Torrent, error) {
 		return torrent, nil
 	case types.TorrentStatusDownloading:
 		if !torrent.DownloadUncached {
-			return torrent, fmt.Errorf("torrent %s: %w", torrent.Name, customerror.TorrentNotCachedError)
+			return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 		}
 		return torrent, nil
 	default:
@@ -481,8 +514,8 @@ func (hw *Highway) DeleteTorrent(torrentId string) error {
 
 // ---------------------------------------------------------------------------------------- Links
 
-func (hw *Highway) GetDownloadLink(ctx context.Context, torrentId string, file *types.File) (types.DownloadLink, error) {
-	return hw.accountsManager.GetDownloadLink(ctx, torrentId, file, hw.fetchDownloadLink)
+func (hw *Highway) GetDownloadLink(torrentId string, file *types.File) (types.DownloadLink, error) {
+	return hw.accountsManager.GetDownloadLink(torrentId, file, hw.fetchDownloadLink)
 }
 
 func (hw *Highway) fetchFile(ctx context.Context, client *request.Client, torrentId, fileId string) (*fileResponse, error) {
@@ -494,7 +527,8 @@ func (hw *Highway) fetchFile(ctx context.Context, client *request.Client, torren
 	return &res, nil
 }
 
-func (hw *Highway) fetchDownloadLink(ctx context.Context, acc *account.Account, torrentId string, file *types.File) (types.DownloadLink, error) {
+func (hw *Highway) fetchDownloadLink(acc *account.Account, torrentId string, file *types.File) (types.DownloadLink, error) {
+	ctx := context.Background()
 	res, err := hw.fetchFile(ctx, acc.Client(), torrentId, file.Id)
 	if errors.Is(err, errNotFound) {
 		return types.DownloadLink{}, customerror.HosterUnavailableError

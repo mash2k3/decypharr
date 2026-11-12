@@ -72,9 +72,9 @@ func TestIsAvailableBatchesAndKeepsInputSpelling(t *testing.T) {
 	for i := 0; i < 120; i++ {
 		hashes = append(hashes, fmt.Sprintf("%040x", i+1))
 	}
-	got, err := hw.IsAvailable(hashes)
+	got, err := hw.checkAvailable(hashes)
 	if err != nil {
-		t.Fatalf("IsAvailable() error = %v", err)
+		t.Fatalf("checkAvailable() error = %v", err)
 	}
 	if !got[strings.ToUpper(testHash)] {
 		t.Errorf("cached hash not reported available")
@@ -118,7 +118,7 @@ func TestSubmitMagnetOnlyWhenCached(t *testing.T) {
 	})
 
 	torrent := &types.Torrent{InfoHash: testHash, Magnet: &utils.Magnet{Link: "magnet:?xt=urn:btih:" + testHash}}
-	if _, err := hw.SubmitMagnet(torrent); !errors.Is(err, customerror.TorrentNotCachedError) {
+	if _, err := hw.SubmitMagnet(torrent); err == nil || !strings.Contains(err.Error(), "not cached") {
 		t.Fatalf("SubmitMagnet() uncached error = %v, want TorrentNotCachedError", err)
 	}
 	if len(posted) != 0 {
@@ -203,7 +203,7 @@ func TestCheckStatusNotCached(t *testing.T) {
 	hw := testHighway(t, func(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, 200, `{"id":"11","service":"torrent","name":"Film A","state":"downloading","progress":40,"size":9,"hash":"`+testHash+`","files":[]}`)
 	})
-	if _, err := hw.CheckStatus(&types.Torrent{Id: "11"}); !errors.Is(err, customerror.TorrentNotCachedError) {
+	if _, err := hw.CheckStatus(&types.Torrent{Id: "11"}); err == nil || !strings.Contains(err.Error(), "not cached") {
 		t.Fatalf("CheckStatus() error = %v, want TorrentNotCachedError", err)
 	}
 	if _, err := hw.CheckStatus(&types.Torrent{Id: "11", DownloadUncached: true}); err != nil {
@@ -260,7 +260,7 @@ func TestDownloadLinkAndCheckFile(t *testing.T) {
 	})
 
 	file := &types.File{TorrentId: "11", Id: "1111111111111111", Name: "film.mkv", Size: 5, Link: "highway://11/1111111111111111"}
-	link, err := hw.GetDownloadLink(t.Context(), "11", file)
+	link, err := hw.GetDownloadLink("11", file)
 	if err != nil {
 		t.Fatalf("GetDownloadLink() error = %v", err)
 	}
@@ -373,5 +373,17 @@ func TestDeleteNotRemoved(t *testing.T) {
 	}
 	if statusCalls != 1 {
 		t.Fatalf("status lookups with reason = %d, want 1", statusCalls)
+	}
+}
+
+// cli_mount's Client.IsAvailable has no error return: a failed check must leave
+// the hash out of the map (unknown), never report it as not cached.
+func TestIsAvailableFailedCheckIsUnknown(t *testing.T) {
+	hw := testHighway(t, func(w http.ResponseWriter, r *http.Request) {
+		writeJSON(w, 500, `{"error":"not_available","message":"down"}`)
+	})
+	got := hw.IsAvailable([]string{testHash})
+	if v, ok := got[testHash]; ok {
+		t.Fatalf("IsAvailable() on a failed check = %v for %s, want the hash left out", v, testHash)
 	}
 }
