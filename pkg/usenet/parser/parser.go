@@ -1013,7 +1013,10 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 	// The main archive failed (missing first volume, missing articles) and only
 	// a small file survived - e.g. an unlabelled sample "238235-0.mkv" next to
 	// a 2.4 GB RAR set. Serving it would put a one-minute clip in the library.
-	if err := leftoverOnly(files, failedArchiveBytes); err != nil {
+	// Skip it when the context ended: groups then fail from the timeout or
+	// cancel, not because the release is incomplete, and the caller needs the
+	// timeout error rather than "main archive failed to parse".
+	if err := leftoverOnly(files, failedArchiveBytes); err != nil && ctx.Err() == nil {
 		p.logger.Warn().Err(err).Int("kept_files", len(files)).Msg("Rejecting NZB: main archive failed and only a small leftover parsed")
 		p.incomplete = err
 		return nil
