@@ -51,6 +51,11 @@ func (a *Account) sliceFileLink(fileLink string) string {
 func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
 	slicedLink := a.sliceFileLink(file.Link)
 	dl, ok := a.links.Load(slicedLink)
+	if ok && !dl.ExpiresAt.IsZero() && time.Now().After(dl.ExpiresAt) {
+		// Expired: drop it and fetch a fresh one rather than serve a dead URL.
+		a.links.Delete(slicedLink)
+		ok = false
+	}
 	if !ok {
 		var err error
 		dl, err = fetcher(a, id, file)

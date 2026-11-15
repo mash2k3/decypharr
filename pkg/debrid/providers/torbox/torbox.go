@@ -107,6 +107,11 @@ func (tb *Torbox) Logger() zerolog.Logger {
 
 // doGet performs a GET request and unmarshals the response
 func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result interface{}) (*http.Response, error) {
+	return tb.doGetWithClient(tb.client, endpoint, queryParams, result)
+}
+
+// doGetWithClient is doGet through a specific (per-account) client.
+func (tb *Torbox) doGetWithClient(client *request.Client, endpoint string, queryParams map[string]string, result interface{}) (*http.Response, error) {
 	u, err := url.Parse(tb.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -125,7 +130,7 @@ func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result i
 		return nil, err
 	}
 
-	resp, err := tb.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -546,6 +551,15 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
+const (
+	// TorBox doesn't document how long a CDN URL lives. Re-resolving hourly is
+	// one requestdl call per open file per hour; an earlier expiry is caught
+	// by the stream's 400/403/410 refetch.
+	cdnLinkLifetime = time.Hour
+	// How long the redirect-URL fallback is kept before resolving again.
+	redirectFallbackLifetime = 5 * time.Minute
+)
+
 func (tb *Torbox) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	return tb.accountsManager.GetDownloadLink(id, file, tb.fetchDownloadLink)
 }
@@ -560,8 +574,41 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 	downloadURL := fmt.Sprintf("%s/api/torrents/requestdl?%s", tb.Host, query.Encode())
 
 	now := time.Now()
+	expiresAt := now.Add(tb.autoExpiresLinksAfter)
 
-	// Always expires
+	// Resolve the CDN URL once, through the rate-limited client. Streaming the
+	// redirect URL makes every range read (every Plex scan/analysis read) a
+	// requestdl call against TorBox's account-wide API limit. The CDN URL is
+	// kept for at most cdnLinkLifetime and refetched when the CDN rejects it.
+	// If resolving fails, fall back to the redirect URL but only briefly, so
+	// the next open tries to resolve again.
+	client := account.Client()
+	if client == nil {
+		client = tb.client
+	}
+	var res DownloadLinksResponse
+	resp, err := tb.doGetWithClient(client, "/api/torrents/requestdl", map[string]string{
+		"token":      account.Token,
+		"torrent_id": id,
+		"file_id":    file.Id,
+		"redirect":   "false",
+	}, &res)
+	if err == nil && resp.StatusCode == http.StatusOK && res.Success && res.Data != nil && strings.HasPrefix(*res.Data, "http") {
+		downloadURL = *res.Data
+		if cdnExp := now.Add(cdnLinkLifetime); cdnExp.Before(expiresAt) {
+			expiresAt = cdnExp
+		}
+	} else {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		tb.logger.Debug().Err(err).Int("status", status).Str("torrent_id", id).Msg("requestdl redirect=false failed, using redirect URL")
+		if fbExp := now.Add(redirectFallbackLifetime); fbExp.Before(expiresAt) {
+			expiresAt = fbExp
+		}
+	}
+
 	dl := types.DownloadLink{
 		Filename:     file.Name,
 		Size:         file.Size,
@@ -571,7 +618,7 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 		Debrid:       tb.config.Name,
 		Id:           file.Id,
 		Generated:    now,
-		ExpiresAt:    now.Add(tb.autoExpiresLinksAfter),
+		ExpiresAt:    expiresAt,
 	}
 	return dl, nil
 }

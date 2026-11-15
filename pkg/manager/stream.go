@@ -379,6 +379,15 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	// Returning a retryable StreamError lets the existing retry loops back off
 	// and try again instead.
 	switch resp.StatusCode {
+	case http.StatusBadRequest, http.StatusForbidden, http.StatusGone:
+		// Presigned CDN URL expired after it was validated (TorBox/RD links
+		// are cached for a while). Drop it so the retry fetches a fresh one.
+		m.linkService.InvalidateLink(downloadLink)
+		return StreamError{
+			Err:       fmt.Errorf("download link rejected (HTTP %d), refetching", resp.StatusCode),
+			Retryable: true,
+			LinkError: true,
+		}
 	case http.StatusTooManyRequests,
 		http.StatusInternalServerError,
 		http.StatusBadGateway,
