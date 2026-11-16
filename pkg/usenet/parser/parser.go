@@ -49,26 +49,32 @@ type NZBParser struct {
 	incomplete error
 }
 
-// leftoverRatio: when archive groups fail, the media that did parse must be at
-// least this fraction of the failed archives' size, or the NZB is rejected.
+// leftoverRatio: when an archive group fails, the largest file that did parse
+// must be at least this fraction of the largest failed group, or the NZB is
+// rejected.
 const leftoverRatio = 4
 
-// leftoverOnly returns an error when archive groups failed and the files that
-// did parse are too small to be the content (less than 1/leftoverRatio of the
-// failed archives' size).
-func leftoverOnly(files []storage.NZBFile, failedArchiveBytes int64) error {
-	if failedArchiveBytes <= 0 {
+// leftoverOnly returns an error when archive groups failed and the largest
+// file that parsed is too small to be the content (less than 1/leftoverRatio
+// of the largest failed group).
+//
+// It compares largest against largest, not totals, so a season pack where
+// some episodes' RAR sets failed still imports the episodes that parsed (each
+// is about the size of a failed set), while a lone sample left next to a
+// failed main archive is rejected.
+func leftoverOnly(files []storage.NZBFile, largestFailedGroup int64) error {
+	if largestFailedGroup <= 0 {
 		return nil
 	}
-	var kept int64
+	var largestKept int64
 	for _, f := range files {
-		kept += f.Size
+		largestKept = max(largestKept, f.Size)
 	}
-	if kept*leftoverRatio >= failedArchiveBytes {
+	if largestKept*leftoverRatio >= largestFailedGroup {
 		return nil
 	}
-	return fmt.Errorf("main archive failed to parse (%d MB unreadable); only %d MB of other files parsed",
-		failedArchiveBytes>>20, kept>>20)
+	return fmt.Errorf("main archive failed to parse (%d MB unreadable); largest other file that parsed is %d MB",
+		largestFailedGroup>>20, largestKept>>20)
 }
 
 func groupBytes(g *FileGroup) int64 {
@@ -973,7 +979,7 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 	}
 
 	var failedMu sync.Mutex
-	var failedArchiveBytes int64
+	var largestFailedGroup int64
 	results := mapper.Map(fileGroups, func(g *FileGroup) []*storage.NZBFile {
 		files, err := p.processFileGroup(ctx, g, password)
 		if err != nil {
@@ -981,7 +987,7 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 			switch g.Type {
 			case storage.NZBFileTypeRar, storage.NZBFileTypeSevenZip, storage.NZBFileTypeZip, storage.NZBFileTypeUnknown:
 				failedMu.Lock()
-				failedArchiveBytes += groupBytes(g)
+				largestFailedGroup = max(largestFailedGroup, groupBytes(g))
 				failedMu.Unlock()
 			}
 			return nil
@@ -1016,7 +1022,7 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 	// Skip it when the context ended: groups then fail from the timeout or
 	// cancel, not because the release is incomplete, and the caller needs the
 	// timeout error rather than "main archive failed to parse".
-	if err := leftoverOnly(files, failedArchiveBytes); err != nil && ctx.Err() == nil {
+	if err := leftoverOnly(files, largestFailedGroup); err != nil && ctx.Err() == nil {
 		p.logger.Warn().Err(err).Int("kept_files", len(files)).Msg("Rejecting NZB: main archive failed and only a small leftover parsed")
 		p.incomplete = err
 		return nil
