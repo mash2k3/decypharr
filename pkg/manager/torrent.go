@@ -153,7 +153,7 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 					// Keep a newly stored entry long enough for the bulk list to
 					// converge instead of mounting it and deleting it on the next
 					// poll.
-					if strings.EqualFold(provider, "Torbox") &&
+					if m.isProviderType(provider, "torbox") &&
 						!entry.CreatedAt.IsZero() && time.Since(entry.CreatedAt) < torboxDeletionGrace {
 						continue
 					}
@@ -163,7 +163,7 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 					} else {
 						torrentsToUpdate = append(torrentsToUpdate, entry)
 					}
-				} else if oldPlacement.NeedsUpdate(currentTorrent) || needsSummaryNameHydration(entry, currentTorrent) {
+				} else if oldPlacement.NeedsUpdate(currentTorrent) || m.needsSummaryNameHydration(entry, currentTorrent) {
 					// currentTorrent has changes for this provider - update placement info
 					// But the issue is that currentTorrent may not have all the metadata we need to update the placement (e.g. downloadedAt, files etc)
 					// So we need to fetch the full torrent info from debrid to ensure we have all the metadata to update the placement correctly
@@ -192,8 +192,20 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 	return newTorrents, torrentsToUpdate, torrentsToDelete, nil
 }
 
-func needsSummaryNameHydration(entry *storage.Entry, remote *types.Torrent) bool {
-	return remote.SummaryOnly && (strings.TrimSpace(entry.Name) == "" || strings.EqualFold(entry.Name, entry.InfoHash))
+// needsSummaryNameHydration asks for one detail fetch to repair a stored entry
+// whose name is empty or its infohash. It is tried once per placement per
+// process: if the provider has no better name either (e.g. its folder is
+// also the hash), retrying would spend one detail call per poll forever.
+func (m *Manager) needsSummaryNameHydration(entry *storage.Entry, remote *types.Torrent) bool {
+	if !remote.SummaryOnly || !isPlaceholderName(entry.Name, entry.InfoHash) {
+		return false
+	}
+	_, tried := m.nameHydrationTried.LoadOrStore(remote.Debrid+"|"+remote.Id+"|"+entry.InfoHash, struct{}{})
+	return !tried
+}
+
+func isPlaceholderName(name, infoHash string) bool {
+	return strings.TrimSpace(name) == "" || strings.EqualFold(strings.TrimSpace(name), infoHash)
 }
 
 // handleTorrentDeletions processes torrent deletions concurrently
@@ -394,8 +406,7 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 		}
 
 	}
-	if (strings.TrimSpace(mt.Name) == "" || strings.EqualFold(mt.Name, mt.InfoHash)) &&
-		strings.TrimSpace(t.Name) != "" && !strings.EqualFold(t.Name, t.InfoHash) {
+	if isPlaceholderName(mt.Name, mt.InfoHash) && !isPlaceholderName(t.Name, t.InfoHash) {
 		mt.Name = t.Name
 		if t.OriginalFilename != "" {
 			mt.OriginalFilename = t.OriginalFilename
@@ -507,10 +518,11 @@ func (m *Manager) refreshTorrentByRdID(infohash string, rdID string) (*storage.E
 // ID, avoiding reliance on a provider's eventually-consistent bulk list.
 func (m *Manager) refreshTorrentByProviderID(infohash, provider, providerID string) (*storage.Entry, error) {
 	existing, _ := m.storage.Get(infohash)
-	client := m.ProviderClient(provider)
+	name, client := m.resolveProviderClient(provider)
 	if client == nil {
 		return nil, fmt.Errorf("debrid provider %q not found", provider)
 	}
+	provider = name
 
 	debridTorrent, err := client.GetTorrent(providerID)
 	if err != nil {
@@ -534,7 +546,9 @@ func (m *Manager) refreshTorrentByProviderID(infohash, provider, providerID stri
 	}
 	if existing != nil {
 		entry = storage.HandleExistingEntryMerge(existing, entry)
-		if existing.Name != "" && existing.Name != existing.OriginalFilename {
+		// Keep a CLI-renamed folder, but never put a hash placeholder back
+		// over the real name the provider just returned.
+		if !isPlaceholderName(existing.Name, existing.InfoHash) && existing.Name != existing.OriginalFilename {
 			entry.Name = existing.Name
 		}
 	}

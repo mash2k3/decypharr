@@ -95,6 +95,10 @@ type Manager struct {
 
 	// Notifications service
 	Notifications *notifications.Service
+
+	// nameHydrationTried records hash-named placements already given their one
+	// detail fetch this process (see needsSummaryNameHydration).
+	nameHydrationTried sync.Map
 }
 
 // New creates a new Manager instance

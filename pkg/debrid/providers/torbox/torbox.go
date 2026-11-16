@@ -451,8 +451,11 @@ func torboxDisplayName(apiName, infoHash, fileRoot string) string {
 		return apiName
 	}
 
+	// TorBox may name the folder after the hash too; that is no better than
+	// the API name, so treat it as missing.
 	fallback := strings.TrimSpace(fileRoot)
-	if fallback != "" && fallback != "." && fallback != "/" {
+	if fallback != "" && fallback != "." && fallback != "/" &&
+		!strings.EqualFold(fallback, infoHash) && !isHexInfoHash(fallback) {
 		return fallback
 	}
 	return apiName
@@ -763,10 +766,11 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 			break
 		}
 		allTorrents = append(allTorrents, torrents...)
+		// Keep paging until an empty page rather than stopping on a short one:
+		// if TorBox ever caps limit below pageLimit, a short-page stop would
+		// drop every torrent past the first page, and the refresh would then
+		// delete them from the mount. The empty last page is one cheap call.
 		offset += len(torrents)
-		if len(torrents) < pageLimit {
-			break
-		}
 	}
 	return allTorrents, nil
 }

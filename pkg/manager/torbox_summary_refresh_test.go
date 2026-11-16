@@ -133,8 +133,14 @@ func (f *summaryRefreshClient) GetTorrent(id string) (*debridTypes.Torrent, erro
 	copy := *t
 	return &copy, nil
 }
+// GetTorrents returns fresh copies, as a real list call does; handing out the
+// same pointers would let one pass's UpdateTorrent leak into the next poll.
 func (f *summaryRefreshClient) GetTorrents() ([]*debridTypes.Torrent, error) {
-	return f.summaries, nil
+	out := make([]*debridTypes.Torrent, 0, len(f.summaries))
+	for _, t := range f.summaries {
+		out = append(out, t.Copy())
+	}
+	return out, nil
 }
 func (f *summaryRefreshClient) Config() config.Debrid {
 	return config.Debrid{Name: "Torbox", Provider: "torbox"}
@@ -298,5 +304,132 @@ func TestTorboxSummaryRefreshHydratesOnlyNewTorrent(t *testing.T) {
 	}
 	if placement := entry.Providers["Torbox"]; placement == nil || placement.ID != "new-1" || len(placement.Files) != 1 {
 		t.Fatalf("new placement = %#v, want hydrated Torbox placement", placement)
+	}
+}
+
+func newSummaryTestManager(t *testing.T, name string, client debrid.Client) (*Manager, *storage.Storage) {
+	t.Helper()
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store(name, client)
+	return &Manager{storage: store, clients: clients, logger: zerolog.Nop()}, store
+}
+
+// cli_debrid always sends provider=Torbox, but the setup wizard stores the
+// client under the lowercase provider type and users can rename it. The
+// targeted sync must still find the TorBox client.
+func TestTargetedProviderSyncResolvesProviderName(t *testing.T) {
+	const hash = "e3d5d8bc1f7a4eb13bd62640229c63f3edfc71e8"
+	for _, stored := range []string{"torbox", "TB Main"} {
+		t.Run(stored, func(t *testing.T) {
+			client := &summaryRefreshClient{details: map[string]*debridTypes.Torrent{
+				"147236436": {
+					Id: "147236436", InfoHash: hash, Name: "Real.Release", Debrid: stored,
+					Status: debridTypes.TorrentStatusDownloaded,
+					Files: map[string]debridTypes.File{
+						"movie.mkv": {TorrentId: "147236436", Id: "1", Name: "movie.mkv", Size: 100},
+					},
+				},
+			}}
+			mgr, _ := newSummaryTestManager(t, stored, client)
+			entry, err := mgr.RefreshTorrentByProviderID(hash, "Torbox", "147236436")
+			if err != nil {
+				t.Fatal(err)
+			}
+			if entry == nil || entry.Providers[stored] == nil {
+				t.Fatalf("entry placements = %#v, want one under %q", entry, stored)
+			}
+
+			// The deletion grace keys on provider type, not the configured name.
+			_, _, deleted, err := mgr.detectTorrentChanges(stored, map[string]*debridTypes.Torrent{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if len(deleted) != 0 {
+				t.Fatalf("recent entry under %q deleted from stale bulk list: %v", stored, deleted)
+			}
+		})
+	}
+}
+
+// With two clients of the same type and no name match, guessing would sync
+// the wrong account; the lookup must fail instead.
+func TestResolveProviderClientAmbiguousType(t *testing.T) {
+	mgr, _ := newSummaryTestManager(t, "TB One", &summaryRefreshClient{})
+	mgr.clients.Store("TB Two", &summaryRefreshClient{})
+	if name, client := mgr.resolveProviderClient("Torbox"); client != nil {
+		t.Fatalf("resolveProviderClient = %q, want no match with two TorBox clients", name)
+	}
+	if name, client := mgr.resolveProviderClient("tb two"); client == nil || name != "TB Two" {
+		t.Fatalf("resolveProviderClient(case-insensitive) = %q", name)
+	}
+}
+
+// If the provider has no better name than the hash, the repair fetch must not
+// repeat on every poll.
+func TestTorboxSummaryHashNameRepairTriedOnce(t *testing.T) {
+	const hash = "e3d5d8bc1f7a4eb13bd62640229c63f3edfc71e8"
+	client := &summaryRefreshClient{
+		summaries: []*debridTypes.Torrent{{
+			Id: "147236436", InfoHash: hash, Name: hash, Debrid: "Torbox",
+			Status: debridTypes.TorrentStatusDownloaded, SummaryOnly: true,
+		}},
+	}
+	mgr, store := newSummaryTestManager(t, "Torbox", client)
+	if err := store.AddOrUpdate(&storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: hash, Name: hash, ActiveProvider: "Torbox",
+		Status: debridTypes.TorrentStatusDownloaded,
+		Files:  map[string]*storage.File{"movie.mkv": {Name: "movie.mkv", Size: 100, InfoHash: hash}},
+		Providers: map[string]*storage.ProviderEntry{"Torbox": {
+			Provider: "Torbox", ID: "147236436", Status: debridTypes.TorrentStatusDownloaded,
+			Files: map[string]*storage.ProviderFile{"movie.mkv": {Id: "1", Link: "torbox://147236436/1", Path: "movie.mkv"}},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	for pass := 0; pass < 3; pass++ {
+		if err := mgr.doRefreshTorrents(context.Background(), "Torbox", client); err != nil {
+			t.Fatal(err)
+		}
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.updates) != 1 {
+		t.Fatalf("detail updates = %v, want exactly one repair attempt", client.updates)
+	}
+}
+
+// A hash-named stored entry must not overwrite the real name a targeted sync
+// just fetched.
+func TestTargetedProviderSyncReplacesHashName(t *testing.T) {
+	const hash = "e3d5d8bc1f7a4eb13bd62640229c63f3edfc71e8"
+	client := &summaryRefreshClient{details: map[string]*debridTypes.Torrent{
+		"147236436": {
+			Id: "147236436", InfoHash: hash, Name: "Real.Release", OriginalFilename: "Real.Release",
+			Debrid: "Torbox", Status: debridTypes.TorrentStatusDownloaded,
+			Files: map[string]debridTypes.File{
+				"movie.mkv": {TorrentId: "147236436", Id: "1", Name: "movie.mkv", Size: 100},
+			},
+		},
+	}}
+	mgr, store := newSummaryTestManager(t, "Torbox", client)
+	if err := store.AddOrUpdate(&storage.Entry{
+		Protocol: config.ProtocolTorrent, InfoHash: hash, Name: hash, OriginalFilename: "Real.Release",
+		ActiveProvider: "Torbox", Status: debridTypes.TorrentStatusDownloaded,
+		Files:     map[string]*storage.File{"movie.mkv": {Name: "movie.mkv", Size: 100, InfoHash: hash}},
+		Providers: map[string]*storage.ProviderEntry{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := mgr.RefreshTorrentByProviderID(hash, "Torbox", "147236436")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != "Real.Release" {
+		t.Fatalf("entry.Name = %q, want Real.Release", entry.Name)
 	}
 }
