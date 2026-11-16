@@ -127,7 +127,7 @@ jobs:
           path: dist/cli_mount_Windows_x86_64.zip
 
   build-darwin:
-    runs-on: macos-latest
+    runs-on: macos-15
     needs: prepare
     strategy:
       matrix:
