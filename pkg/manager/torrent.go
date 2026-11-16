@@ -3,6 +3,7 @@ package manager
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -151,7 +152,7 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 					} else {
 						torrentsToUpdate = append(torrentsToUpdate, entry)
 					}
-				} else if oldPlacement.NeedsUpdate(currentTorrent) {
+				} else if oldPlacement.NeedsUpdate(currentTorrent) || needsSummaryNameHydration(entry, currentTorrent) {
 					// currentTorrent has changes for this provider - update placement info
 					// But the issue is that currentTorrent may not have all the metadata we need to update the placement (e.g. downloadedAt, files etc)
 					// So we need to fetch the full torrent info from debrid to ensure we have all the metadata to update the placement correctly
@@ -178,6 +179,10 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 	}
 
 	return newTorrents, torrentsToUpdate, torrentsToDelete, nil
+}
+
+func needsSummaryNameHydration(entry *storage.Entry, remote *types.Torrent) bool {
+	return remote.SummaryOnly && (strings.TrimSpace(entry.Name) == "" || strings.EqualFold(entry.Name, entry.InfoHash))
 }
 
 // handleTorrentDeletions processes torrent deletions concurrently
@@ -377,6 +382,13 @@ func (m *Manager) processSyncTorrent(t *types.Torrent) (*storage.Entry, error) {
 			UpdatedAt:        time.Now(),
 		}
 
+	}
+	if (strings.TrimSpace(mt.Name) == "" || strings.EqualFold(mt.Name, mt.InfoHash)) &&
+		strings.TrimSpace(t.Name) != "" && !strings.EqualFold(t.Name, t.InfoHash) {
+		mt.Name = t.Name
+		if t.OriginalFilename != "" {
+			mt.OriginalFilename = t.OriginalFilename
+		}
 	}
 
 	// Clear Bad flag — a successful sync means the torrent is back on RD with a

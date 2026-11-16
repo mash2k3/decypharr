@@ -16,9 +16,10 @@ import (
 )
 
 type summaryRefreshClient struct {
-	summaries []*debridTypes.Torrent
-	mu        sync.Mutex
-	updates   []string
+	summaries   []*debridTypes.Torrent
+	detailNames map[string]string
+	mu          sync.Mutex
+	updates     []string
 }
 
 func (f *summaryRefreshClient) SubmitMagnet(t *debridTypes.Torrent) (*debridTypes.Torrent, error) {
@@ -40,6 +41,10 @@ func (f *summaryRefreshClient) UpdateTorrent(t *debridTypes.Torrent) error {
 	f.mu.Unlock()
 	t.Status = debridTypes.TorrentStatusDownloaded
 	t.SummaryOnly = false
+	if name := f.detailNames[t.Id]; name != "" {
+		t.Name = name
+		t.OriginalFilename = name
+	}
 	t.Files = map[string]debridTypes.File{
 		"movie.mkv": {
 			TorrentId: t.Id,
@@ -51,6 +56,72 @@ func (f *summaryRefreshClient) UpdateTorrent(t *debridTypes.Torrent) error {
 		},
 	}
 	return nil
+}
+
+func TestTorboxSummaryRefreshRepairsExistingHashName(t *testing.T) {
+	store, err := storage.NewStorage(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = store.Close() })
+
+	const (
+		hash = "e3d5d8bc1f7a4eb13bd62640229c63f3edfc71e8"
+		root = "www.UIndex.org    -    Strange.Harvest.2025.1080p.WEB-DL.EAC3.H264-MG"
+	)
+	if err := store.AddOrUpdate(&storage.Entry{
+		Protocol:       config.ProtocolTorrent,
+		InfoHash:       hash,
+		Name:           hash,
+		ActiveProvider: "Torbox",
+		Status:         debridTypes.TorrentStatusDownloaded,
+		Files: map[string]*storage.File{
+			"movie.mkv": {Name: "movie.mkv", Size: 100, InfoHash: hash},
+		},
+		Providers: map[string]*storage.ProviderEntry{
+			"Torbox": {
+				Provider: "Torbox",
+				ID:       "147236436",
+				Status:   debridTypes.TorrentStatusDownloaded,
+				Files: map[string]*storage.ProviderFile{
+					"movie.mkv": {Id: "1", Link: "torbox://147236436/1", Path: "movie.mkv"},
+				},
+			},
+		},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	client := &summaryRefreshClient{
+		detailNames: map[string]string{"147236436": root},
+		summaries: []*debridTypes.Torrent{{
+			Id:          "147236436",
+			InfoHash:    hash,
+			Name:        hash,
+			Debrid:      "Torbox",
+			Status:      debridTypes.TorrentStatusDownloaded,
+			SummaryOnly: true,
+		}},
+	}
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store("Torbox", client)
+	mgr := &Manager{storage: store, clients: clients, logger: zerolog.Nop()}
+
+	if err := mgr.doRefreshTorrents(context.Background(), "Torbox", client); err != nil {
+		t.Fatal(err)
+	}
+	entry, err := store.Get(hash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if entry.Name != root || entry.OriginalFilename != root {
+		t.Fatalf("stored names = (%q, %q), want %q", entry.Name, entry.OriginalFilename, root)
+	}
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	if len(client.updates) != 1 || client.updates[0] != "147236436" {
+		t.Fatalf("detail updates = %v, want one hash-name repair", client.updates)
+	}
 }
 func (f *summaryRefreshClient) GetTorrent(string) (*debridTypes.Torrent, error) {
 	return nil, nil
