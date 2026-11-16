@@ -47,6 +47,7 @@ const (
 	refreshDeleteWorkers   = 10
 	refreshWorkChanBuffer  = 100
 	refreshBatchChanBuffer = 50
+	torboxDeletionGrace    = 15 * time.Minute
 )
 
 // refreshTorrents refreshes torrents from a specific debrid service.
@@ -146,6 +147,16 @@ func (m *Manager) detectTorrentChanges(provider string, remoteTorrentsByHash map
 
 			if placementOnDebrid {
 				if !onRemote {
+					// TorBox documents its bulk torrent list as cached for up to
+					// ten minutes. Even bypass_cache responses have transiently
+					// omitted torrents that were just created and fetched by ID.
+					// Keep a newly stored entry long enough for the bulk list to
+					// converge instead of mounting it and deleting it on the next
+					// poll.
+					if strings.EqualFold(provider, "Torbox") &&
+						!entry.CreatedAt.IsZero() && time.Since(entry.CreatedAt) < torboxDeletionGrace {
+						continue
+					}
 					entry.RemoveProvider(provider, nil)
 					if len(entry.Providers) == 0 {
 						torrentsToDelete = append(torrentsToDelete, entry.InfoHash)
@@ -488,6 +499,49 @@ func (m *Manager) refreshTorrentByRdID(infohash string, rdID string) (*storage.E
 	} else {
 		m.logger.Warn().Str("infohash", infohash).Str("rdId", rdID).Msg("refreshTorrentByRdID: processSyncTorrent returned nil")
 	}
+	return entry, nil
+}
+
+// refreshTorrentByProviderID stores a torrent directly from its provider ID.
+// It is used when the submitting application already knows the newly-created
+// ID, avoiding reliance on a provider's eventually-consistent bulk list.
+func (m *Manager) refreshTorrentByProviderID(infohash, provider, providerID string) (*storage.Entry, error) {
+	existing, _ := m.storage.Get(infohash)
+	client := m.ProviderClient(provider)
+	if client == nil {
+		return nil, fmt.Errorf("debrid provider %q not found", provider)
+	}
+
+	debridTorrent, err := client.GetTorrent(providerID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get torrent %s from %s: %w", providerID, provider, err)
+	}
+	if debridTorrent == nil {
+		return nil, fmt.Errorf("torrent %s not found on %s", providerID, provider)
+	}
+	if debridTorrent.InfoHash == "" {
+		debridTorrent.InfoHash = infohash
+	} else if !strings.EqualFold(debridTorrent.InfoHash, infohash) {
+		return nil, fmt.Errorf("torrent %s on %s returned infohash %s, want %s", providerID, provider, debridTorrent.InfoHash, infohash)
+	}
+
+	entry, err := m.processSyncTorrent(debridTorrent)
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		return nil, nil
+	}
+	if existing != nil {
+		entry = storage.HandleExistingEntryMerge(existing, entry)
+		if existing.Name != "" && existing.Name != existing.OriginalFilename {
+			entry.Name = existing.Name
+		}
+	}
+	if err := m.storage.AddOrUpdate(entry); err != nil {
+		return nil, err
+	}
+	m.logger.Info().Str("infohash", infohash).Str("provider", provider).Str("provider_id", providerID).Str("name", entry.Name).Msg("saved targeted provider sync")
 	return entry, nil
 }
 
