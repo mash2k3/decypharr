@@ -2,6 +2,7 @@ package torbox
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -48,7 +49,21 @@ type Torbox struct {
 	downloadPresentCache  sync.Map
 	downloadPresentMu     sync.Mutex
 	downloadPresentLoaded bool
+
+	// createtorrent has its own TorBox limit (60/hour at the time of writing),
+	// separate from the 300/min API cap, and every call counts, including
+	// add_only_if_cached refusals. Once TorBox refuses an add, further adds are
+	// rejected locally until this time instead of each one waiting ~30s for
+	// another 429. (Upstream PR #444.)
+	addPauseMu    sync.Mutex
+	addPauseUntil time.Time
 }
+
+// defaultAddLimitPause is used when TorBox refuses an add without Retry-After.
+const defaultAddLimitPause = 5 * time.Minute
+
+// maxAddLimitPause caps an unusually large Retry-After from TorBox.
+const maxAddLimitPause = time.Hour
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
 	cfg := config.Get()
@@ -167,6 +182,16 @@ func (tb *Torbox) doGetWithClient(client *request.Client, endpoint string, query
 
 // doPostForm performs a POST request with form data
 func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result interface{}) (*http.Response, error) {
+	return tb.postForm(endpoint, formData, result, false)
+}
+
+// doPostFormOnce is doPostForm without retries, for endpoints with their own
+// tight TorBox limit where a retry only burns more of it.
+func (tb *Torbox) doPostFormOnce(endpoint string, formData map[string]string, result interface{}) (*http.Response, error) {
+	return tb.postForm(endpoint, formData, result, true)
+}
+
+func (tb *Torbox) postForm(endpoint string, formData map[string]string, result interface{}, once bool) (*http.Response, error) {
 	form := url.Values{}
 	for k, v := range formData {
 		form.Set(k, v)
@@ -178,7 +203,11 @@ func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := tb.client.Do(req)
+	do := tb.client.Do
+	if once {
+		do = tb.client.DoOnce
+	}
+	resp, err := do(req)
 	if err != nil {
 		return nil, err
 	}
@@ -293,7 +322,41 @@ func (tb *Torbox) isCached(hash string) (cached bool, known bool) {
 	return false, true
 }
 
+// addsPausedUntil returns when adds may resume, or zero if they are allowed now.
+func (tb *Torbox) addsPausedUntil() time.Time {
+	tb.addPauseMu.Lock()
+	defer tb.addPauseMu.Unlock()
+	if time.Now().Before(tb.addPauseUntil) {
+		return tb.addPauseUntil
+	}
+	return time.Time{}
+}
+
+// pauseAdds records a TorBox add-limit refusal and returns when adds resume.
+func (tb *Torbox) pauseAdds(resp *http.Response) time.Time {
+	wait := defaultAddLimitPause
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+			wait = time.Duration(secs) * time.Second
+		} else if t, err := http.ParseTime(ra); err == nil && time.Until(t) > 0 {
+			wait = time.Until(t)
+		}
+	}
+	wait = min(wait, maxAddLimitPause)
+
+	tb.addPauseMu.Lock()
+	defer tb.addPauseMu.Unlock()
+	if until := time.Now().Add(wait); until.After(tb.addPauseUntil) {
+		tb.addPauseUntil = until
+	}
+	return tb.addPauseUntil
+}
+
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+	if until := tb.addsPausedUntil(); !until.IsZero() {
+		return nil, fmt.Errorf("torbox add limit reached, torrent adds paused until %s", until.Local().Format("15:04:05"))
+	}
+
 	var data AddMagnetResponse
 
 	formData := map[string]string{
@@ -316,20 +379,35 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		}
 	}
 
-	resp, err := tb.doPostForm("/api/torrents/createtorrent", formData, &data)
+	// Sent once: TorBox holds an over-limit add ~30s before its 429, so the
+	// client's retries would hang a single grab for minutes and spend more of
+	// the add limit.
+	resp, err := tb.doPostFormOnce("/api/torrents/createtorrent", formData, &data)
 	if err != nil {
 		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		until := tb.pauseAdds(resp)
+		tb.logger.Warn().Msgf("TorBox add limit reached, pausing torrent adds until %s", until.Local().Format("15:04:05"))
+		return nil, fmt.Errorf("torbox add limit reached, torrent adds paused until %s", until.Local().Format("15:04:05"))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
-	if data.Data == nil {
+	// An array response can list several torrents; take the one for this hash.
+	var id int
+	for _, added := range data.Data {
+		if len(data.Data) == 1 || strings.EqualFold(added.Hash, torrent.InfoHash) {
+			id = cmp.Or(added.TorrentId, added.Id)
+			break
+		}
+	}
+	if id == 0 {
 		return nil, fmt.Errorf("error adding torrent")
 	}
-	dt := *data.Data
-	torrentId := strconv.Itoa(dt.Id)
-	torrent.Id = torrentId
+	torrent.Id = strconv.Itoa(id)
 	torrent.Debrid = tb.config.Name
 	torrent.Added = time.Now()
 
@@ -345,6 +423,10 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 		"forcedUP", "allocating", "downloading", "metaDL", "pausedDL",
 		"queuedDL", "checkingDL", "forcedDL", "checkingResumeData", "moving",
 		"incomplete",
+		// A new uncached torrent starts as "queued", then "checking", before
+		// downloading. Treating them as errors failed healthy adds.
+		// (Upstream 3448c74, PR #473.)
+		"queued", "checking",
 	}
 
 	downloaded := []string{
