@@ -714,11 +714,13 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 }
 
 func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
+	const pageLimit = 1000
+
 	offset := 0
 	allTorrents := make([]*types.Torrent, 0)
 
 	for {
-		torrents, err := tb.getTorrents(offset)
+		torrents, err := tb.getTorrents(offset, pageLimit)
 		if err != nil {
 			// A mid-pagination failure must propagate as an error, not be
 			// swallowed — returning the partial list with a nil error here
@@ -732,16 +734,23 @@ func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
 		}
 		allTorrents = append(allTorrents, torrents...)
 		offset += len(torrents)
+		if len(torrents) < pageLimit {
+			break
+		}
 	}
 	return allTorrents, nil
 }
 
-func (tb *Torbox) getTorrents(offset int) ([]*types.Torrent, error) {
+func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 	var res TorrentsListResponse
 
 	resp, err := tb.doGet("/api/torrents/mylist", map[string]string{
 		"bypass_cache": "true",
-		"offset":       fmt.Sprintf("%d", offset),
+		// List polling only needs torrent-level state. New and changed torrents
+		// are hydrated individually by UpdateTorrent before storage is updated.
+		"files":  "false",
+		"limit":  strconv.Itoa(limit),
+		"offset": fmt.Sprintf("%d", offset),
 	}, &res)
 	if err != nil {
 		return nil, err
