@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/rs/zerolog"
@@ -97,5 +98,18 @@ func testTorbox(host string) *Torbox {
 		client: request.New(request.WithMaxRetries(0)),
 		logger: zerolog.Nop(),
 		config: config.Debrid{Name: "torbox"},
+	}
+}
+
+// A file root that is itself the hash is no better than the API name; it must
+// not be adopted as the display name (it would also keep the stored entry
+// looking hash-named and due for another repair fetch).
+func TestTorboxDisplayNameIgnoresHashFileRoot(t *testing.T) {
+	const hash = "e3d5d8bc1f7a4eb13bd62640229c63f3edfc71e8"
+	if got := torboxDisplayName(hash, hash, strings.ToUpper(hash)); got != hash {
+		t.Fatalf("torboxDisplayName(hash root) = %q, want API name %q", got, hash)
+	}
+	if got := torboxDisplayName(hash, hash, "Real.Release"); got != "Real.Release" {
+		t.Fatalf("torboxDisplayName(real root) = %q, want Real.Release", got)
 	}
 }

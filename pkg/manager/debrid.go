@@ -3,6 +3,7 @@ package manager
 import (
 	"cmp"
 	"errors"
+	"strings"
 
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -28,6 +29,52 @@ func (m *Manager) ProviderClient(name string) debrid.Client {
 		return nil
 	}
 	return client
+}
+
+// resolveProviderClient finds a client for a name supplied by an outside caller
+// (e.g. cli_debrid's targeted sync, which always says "Torbox"). Clients are
+// keyed by the user's configured name, which the setup wizard writes as the
+// lowercase provider type ("torbox") and users may rename freely. Lookup order:
+// exact name, case-insensitive name, then the only client of that provider
+// type. Returns the configured name the client is stored under.
+func (m *Manager) resolveProviderClient(name string) (string, debrid.Client) {
+	if client := m.ProviderClient(name); client != nil {
+		return name, client
+	}
+	var (
+		foldName   string
+		foldClient debrid.Client
+		typeName   string
+		typeClient debrid.Client
+		typeCount  int
+	)
+	m.clients.Range(func(key string, client debrid.Client) bool {
+		if client == nil {
+			return true
+		}
+		if foldClient == nil && strings.EqualFold(key, name) {
+			foldName, foldClient = key, client
+		}
+		if strings.EqualFold(client.Config().Provider, name) {
+			typeName, typeClient = key, client
+			typeCount++
+		}
+		return true
+	})
+	if foldClient != nil {
+		return foldName, foldClient
+	}
+	if typeCount == 1 {
+		return typeName, typeClient
+	}
+	return "", nil
+}
+
+// isProviderType reports whether the client stored under the configured name
+// is of the given provider type ("torbox", "realdebrid", ...).
+func (m *Manager) isProviderType(name, providerType string) bool {
+	client := m.ProviderClient(name)
+	return client != nil && strings.EqualFold(client.Config().Provider, providerType)
 }
 
 func (m *Manager) initDebridClients() {

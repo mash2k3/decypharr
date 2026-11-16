@@ -36,6 +36,10 @@ func TestGetTorrentsBypassesTorboxCache(t *testing.T) {
 		mu.Unlock()
 
 		w.Header().Set("Content-Type", "application/json")
+		if offset != "0" {
+			_, _ = fmt.Fprint(w, `{"success":true,"data":[]}`)
+			return
+		}
 		_, _ = fmt.Fprint(w, `{"success":true,"data":[{"id":17,"name":"Release.mkv","size":100,"progress":1,"download_state":"completed","download_finished":true,"hash":"ABC"}]}`)
 	})
 
@@ -52,8 +56,10 @@ func TestGetTorrentsBypassesTorboxCache(t *testing.T) {
 
 	mu.Lock()
 	defer mu.Unlock()
-	if !slices.Equal(offsets, []string{"0"}) {
-		t.Fatalf("offsets = %v, want [0] (short final page must not request an empty page)", offsets)
+	// A short page does not end the sweep (TorBox may cap limit below 1000);
+	// only an empty page does.
+	if !slices.Equal(offsets, []string{"0", "1"}) {
+		t.Fatalf("offsets = %v, want [0 1] (page until empty)", offsets)
 	}
 }
 
