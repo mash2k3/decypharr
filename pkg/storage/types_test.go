@@ -45,3 +45,25 @@ func TestProviderEntryNeedsUpdateDoesNotHydrateEmptyRemoteSummary(t *testing.T) 
 		t.Fatal("status changes must still update lightweight remote summaries")
 	}
 }
+
+func TestProviderEntryNeedsUpdateIgnoresSummaryStatusButNotID(t *testing.T) {
+	placement := &ProviderEntry{
+		ID:     "17",
+		Status: debridTypes.TorrentStatusDownloaded,
+		Files:  map[string]*ProviderFile{"movie.mkv": {Id: "1", Link: "provider://17/1"}},
+	}
+	remote := &debridTypes.Torrent{
+		Id:          "17",
+		Status:      debridTypes.TorrentStatusDownloading,
+		SummaryOnly: true,
+	}
+
+	if placement.NeedsUpdate(remote) {
+		t.Fatal("summary-only status must not downgrade an existing placement")
+	}
+
+	remote.Id = "18"
+	if !placement.NeedsUpdate(remote) {
+		t.Fatal("a changed provider ID must update even for a summary-only row")
+	}
+}

@@ -46,6 +46,9 @@ func TestGetTorrentsBypassesTorboxCache(t *testing.T) {
 	if len(torrents) != 1 || torrents[0].Id != "17" {
 		t.Fatalf("GetTorrents() = %#v, want torrent 17", torrents)
 	}
+	if !torrents[0].SummaryOnly {
+		t.Fatal("GetTorrents() row must be marked summary-only when files are omitted")
+	}
 
 	mu.Lock()
 	defer mu.Unlock()

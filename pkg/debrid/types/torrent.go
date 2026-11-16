@@ -26,6 +26,10 @@ type Torrent struct {
 	Seeders          int             `json:"seeders"`
 	Links            []string        `json:"links"`
 	DeletedFiles     []string        `json:"deleted_files"`
+	// SummaryOnly marks provider list rows that intentionally omit authoritative
+	// detail fields. They may discover new hashes/IDs, but must not downgrade an
+	// existing placement from stale or inconsistent list status metadata.
+	SummaryOnly bool `json:"-"`
 
 	Debrid string `json:"debrid"`
 
@@ -69,6 +73,7 @@ func (t *Torrent) Copy() *Torrent {
 		Speed:            t.Speed,
 		Seeders:          t.Seeders,
 		Links:            append([]string{}, t.Links...),
+		SummaryOnly:      t.SummaryOnly,
 		Debrid:           t.Debrid,
 		Arr:              t.Arr,
 	}
