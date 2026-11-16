@@ -108,7 +108,7 @@ func WithProxy(proxyURL string) ClientOption {
 
 // Do performs an HTTP request with retries for certain status codes
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	if err := c.prepare(req); err != nil {
+	if err := c.prepare(req, false); err != nil {
 		return nil, err
 	}
 
@@ -125,14 +125,16 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 // settings. Use it for endpoints with a tight per-call quota, where a retry
 // only spends more of it. (Upstream PR #444.)
 func (c *Client) DoOnce(req *http.Request) (*http.Response, error) {
-	if err := c.prepare(req); err != nil {
+	if err := c.prepare(req, true); err != nil {
 		return nil, err
 	}
 	return c.httpClient.Do(req)
 }
 
-// prepare applies the client's headers and rate limit to req.
-func (c *Client) prepare(req *http.Request) error {
+// prepare applies the client's headers to req. DoOnce also spends its one
+// rate-limit token here; retried requests spend one token per wire attempt via
+// retryablehttp's RequestLogHook (configured in New).
+func (c *Client) prepare(req *http.Request, takeRateLimit bool) error {
 	c.headersMu.RLock()
 	if c.headers != nil {
 		for key, value := range c.headers {
@@ -141,7 +143,7 @@ func (c *Client) prepare(req *http.Request) error {
 	}
 	c.headersMu.RUnlock()
 
-	if c.rateLimiter != nil {
+	if takeRateLimit && c.rateLimiter != nil {
 		select {
 		case <-req.Context().Done():
 			return req.Context().Err()
@@ -275,6 +277,15 @@ func New(options ...ClientOption) *Client {
 	retryClient.RetryWaitMax = 30 * time.Second
 	retryClient.Logger = nil // Disable default logging
 	retryClient.Backoff = retryAfterBackoff
+	// Retries are real provider requests, so each attempt must spend a token.
+	// Taking only once before retryablehttp.Do allowed RetryMax+1 wire calls
+	// while accounting for a single call.
+	retryClient.RequestLogHook = func(_ retryablehttp.Logger, req *http.Request, _ int) {
+		if client.rateLimiter == nil || req.Context().Err() != nil {
+			return
+		}
+		client.rateLimiter.Take()
+	}
 
 	// Custom retry policy based on retryable status codes
 	retryClient.CheckRetry = func(ctx context.Context, resp *http.Response, err error) (bool, error) {

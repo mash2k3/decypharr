@@ -4,10 +4,11 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/rs/zerolog"
+	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/pkg/debrid/account"
 	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
@@ -47,9 +48,40 @@ func TestFetchDownloadLinkResolvesCDNURL(t *testing.T) {
 	}
 }
 
-// If requestdl can't be resolved (429, outage), keep streaming through the
-// redirect URL, but only briefly so the next open tries to resolve again.
-func TestFetchDownloadLinkFallsBackToRedirectURL(t *testing.T) {
+// Repeated opens of one file (Plex probes and range reads) reuse the resolved
+// CDN URL. They must not call requestdl once per open.
+func TestGetDownloadLinkCachesResolutionAcrossOpens(t *testing.T) {
+	var calls int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"success":true,"data":"https://store-1.tb-cdn.st/file?token=x"}`)
+	}))
+	t.Cleanup(server.Close)
+
+	dc := config.Debrid{Name: "torbox", APIKey: "main-key", DownloadAPIKeys: []string{"download-key"}}
+	tb := testTorbox(server.URL)
+	tb.autoExpiresLinksAfter = 48 * time.Hour
+	tb.accountsManager = account.NewManager(dc, nil, zerolog.Nop())
+	file := &types.File{Id: "3", Name: "a.mkv", Link: "torbox://7/3"}
+
+	for i := 0; i < 25; i++ {
+		dl, err := tb.GetDownloadLink("7", file)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if dl.Token != "download-key" {
+			t.Fatalf("Token = %q, want selected download key", dl.Token)
+		}
+	}
+	if calls != 1 {
+		t.Fatalf("requestdl calls = %d after 25 opens, want 1", calls)
+	}
+}
+
+// If requestdl can't be resolved, never hand the API permalink to the stream:
+// each range request through it would be an API call outside our limiter.
+func TestFetchDownloadLinkFailureDoesNotReturnRedirectURL(t *testing.T) {
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "busy", http.StatusTooManyRequests)
 	}))
@@ -58,14 +90,11 @@ func TestFetchDownloadLinkFallsBackToRedirectURL(t *testing.T) {
 	tb := testTorbox(server.URL)
 	tb.autoExpiresLinksAfter = 48 * time.Hour
 	dl, err := tb.fetchDownloadLink(&account.Account{Token: "key"}, "7", &types.File{Id: "3", Name: "a.mkv"})
-	if err != nil {
-		t.Fatal(err)
+	if err == nil {
+		t.Fatalf("DownloadLink = %q, want resolution error", dl.DownloadLink)
 	}
-	if !strings.Contains(dl.DownloadLink, "/api/torrents/requestdl?") || !strings.Contains(dl.DownloadLink, "redirect=true") {
-		t.Fatalf("DownloadLink = %q, want the redirect URL", dl.DownloadLink)
-	}
-	if life := time.Until(dl.ExpiresAt); life > redirectFallbackLifetime || life <= 0 {
-		t.Fatalf("fallback lifetime = %s, want (0, %s]", life, redirectFallbackLifetime)
+	if dl.DownloadLink != "" {
+		t.Fatalf("DownloadLink = %q, want no API redirect fallback", dl.DownloadLink)
 	}
 }
 
