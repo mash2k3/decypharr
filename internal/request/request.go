@@ -283,14 +283,13 @@ func New(options ...ClientOption) *Client {
 			return false, ctx.Err()
 		}
 
-		// First use the default retry policy for error handling
-		// This handles the case when resp is nil (network errors)
-		shouldRetry, defaultErr := retryablehttp.DefaultRetryPolicy(ctx, resp, err)
-		if defaultErr != nil {
-			return false, defaultErr
-		}
-		if shouldRetry {
-			return true, nil
+		// Use the default policy for transport errors only. HTTP responses are
+		// retried only for the client's configured statuses: the default policy
+		// retries every 5xx and, once it gives up, returns no response, which
+		// threw away provider error bodies (e.g. RealDebrid's 503 with
+		// error_code 19 for a dead file). (Upstream e633bc9.)
+		if err != nil || resp == nil {
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 		}
 
 		// Check for retryable status codes (only if resp is not nil)
