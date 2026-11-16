@@ -240,7 +240,12 @@ func (p *ProviderEntry) NeedsUpdate(remote *debridTypes.Torrent) bool {
 		return true // Status changed (e.g., downloading → downloaded)
 	}
 
-	if len(p.Files) == 0 {
+	// A provider placement with no stored files only needs hydration when the
+	// remote list response actually contains file metadata. Some providers
+	// (notably TorBox) support lightweight list responses with files omitted;
+	// treating every such summary as stale re-queues permanently incomplete
+	// historical entries on every refresh and starves genuinely new torrents.
+	if len(p.Files) == 0 && len(remote.Files) > 0 {
 		return true
 	}
 	return false
