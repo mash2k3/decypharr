@@ -70,6 +70,15 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		mainRL = ratelimit.New(300, ratelimit.Per(time.Minute), ratelimit.WithSlack(30))
 	}
 
+	// TorBox's cap counts per API key. requestdl now goes through the account
+	// client, so when the download keys are just the main key it must share the
+	// main bucket; two buckets on one key could emit ~550/min against a 300/min
+	// cap. (Upstream 3a0e0e2.)
+	downloadRL := mainRL
+	if !onlyUsesKey(dc.DownloadAPIKeys, dc.APIKey) && ratelimits["download"] != nil {
+		downloadRL = ratelimits["download"]
+	}
+
 	opts := []request.ClientOption{
 		request.WithHeaders(headers),
 		request.WithRateLimiter(mainRL),
@@ -88,13 +97,24 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	tb := &Torbox{
 		Host:                  "https://api.torbox.app/v1",
 		APIKey:                dc.APIKey,
-		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
+		accountsManager:       account.NewManager(dc, downloadRL, _log),
 		config:                dc,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                request.New(opts...),
 		logger:                _log,
 	}
 	return tb, nil
+}
+
+// onlyUsesKey reports whether the download keys are just the main key, in
+// which case download traffic spends the same per-key budget as everything else.
+func onlyUsesKey(downloadKeys []string, apiKey string) bool {
+	for _, key := range downloadKeys {
+		if key != "" && key != apiKey {
+			return false
+		}
+	}
+	return true
 }
 
 func (tb *Torbox) Config() config.Debrid {

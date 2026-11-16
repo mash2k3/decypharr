@@ -68,3 +68,21 @@ func TestFetchDownloadLinkFallsBackToRedirectURL(t *testing.T) {
 		t.Fatalf("fallback lifetime = %s, want (0, %s]", life, redirectFallbackLifetime)
 	}
 }
+
+func TestOnlyUsesKey(t *testing.T) {
+	cases := []struct {
+		keys []string
+		want bool
+	}{
+		{nil, true},
+		{[]string{"main"}, true},
+		{[]string{"main", ""}, true},
+		{[]string{"main", "other"}, false},
+		{[]string{"other"}, false},
+	}
+	for _, c := range cases {
+		if got := onlyUsesKey(c.keys, "main"); got != c.want {
+			t.Errorf("onlyUsesKey(%v) = %v, want %v", c.keys, got, c.want)
+		}
+	}
+}
