@@ -635,6 +635,12 @@ func (m *Manager) RefreshTorrentByRdID(infohash string, rdID string) (*storage.E
 	return m.refreshTorrentByRdID(infohash, rdID)
 }
 
+// RefreshTorrentByProviderID syncs a newly-created torrent directly by the
+// provider ID returned to the submitting application.
+func (m *Manager) RefreshTorrentByProviderID(infohash, provider, providerID string) (*storage.Entry, error) {
+	return m.refreshTorrentByProviderID(infohash, provider, providerID)
+}
+
 func (m *Manager) EntryExists(infohash string) (bool, error) {
 	return m.storage.Exists(infohash)
 }

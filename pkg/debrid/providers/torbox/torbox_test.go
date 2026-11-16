@@ -10,6 +10,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/request"
+	"github.com/sirrobot01/decypharr/pkg/debrid/types"
 )
 
 func TestDeleteTorrentUsesControlEndpoint(t *testing.T) {
@@ -63,6 +64,30 @@ func TestGetTorrentAcceptsObjectAndArrayResponses(t *testing.T) {
 				t.Fatalf("GetTorrent() = %#v, want torrent 17 with one file", torrent)
 			}
 		})
+	}
+}
+
+func TestUpdateTorrentFallsBackFromHashNameToFileRoot(t *testing.T) {
+	const (
+		hash = "e3d5d8bc1f7a4eb13bd62640229c63f3edfc71e8"
+		root = "www.UIndex.org    -    Strange.Harvest.2025.1080p.WEB-DL.EAC3.H264-MG"
+	)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprintf(w, `{"success":true,"data":{"id":147236436,"name":%q,"hash":%q,"size":5943949483,"progress":1,"download_state":"cached","download_finished":true,"files":[{"id":1,"name":%q,"absolute_path":%q,"size":5943949483}]}}`,
+			hash, hash, root+"/Strange.Harvest.2025.1080p.WEB-DL.EAC3.H264-MG.mkv", "/completed/"+hash+"/"+root+"/Strange.Harvest.2025.1080p.WEB-DL.EAC3.H264-MG.mkv")
+	}))
+	t.Cleanup(server.Close)
+
+	torrent := &types.Torrent{Id: "147236436", InfoHash: hash, Name: hash, SummaryOnly: true}
+	if err := testTorbox(server.URL).UpdateTorrent(torrent); err != nil {
+		t.Fatalf("UpdateTorrent() error = %v", err)
+	}
+	if torrent.Name != root || torrent.Filename != root || torrent.OriginalFilename != root {
+		t.Fatalf("names = (%q, %q, %q), want file root %q", torrent.Name, torrent.Filename, torrent.OriginalFilename, root)
+	}
+	if torrent.SummaryOnly {
+		t.Fatal("hydrated torrent must not remain summary-only")
 	}
 }
 

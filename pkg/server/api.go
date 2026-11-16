@@ -429,8 +429,9 @@ func sortQueuedTorrents(torrents []*storage.Entry, sortBy, sortOrder string) {
 }
 
 // handleSyncTorrent triggers an immediate sync for a specific torrent by infohash.
-// Accepts optional ?rdId=<RD_torrent_ID> to fetch from RD using the new ID after
-// re-insertion, bypassing the stale placement ID stored in entries.db.
+// Accepts either ?rdId=<RD_torrent_ID> for the legacy repair path, or
+// ?provider=<name>&providerId=<id> to store a newly-created provider torrent
+// without waiting for its eventually-consistent bulk list.
 func (s *Server) handleSyncTorrent(w http.ResponseWriter, r *http.Request) {
 	hash := chi.URLParam(r, "hash")
 	if hash == "" {
@@ -438,11 +439,19 @@ func (s *Server) handleSyncTorrent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	rdID := r.URL.Query().Get("rdId")
+	provider := r.URL.Query().Get("provider")
+	providerID := r.URL.Query().Get("providerId")
 
 	var entry *storage.Entry
 	var err error
 
-	if rdID != "" {
+	if (provider == "") != (providerID == "") {
+		http.Error(w, "provider and providerId must be supplied together", http.StatusBadRequest)
+		return
+	}
+	if provider != "" {
+		entry, err = s.manager.RefreshTorrentByProviderID(hash, provider, providerID)
+	} else if rdID != "" {
 		entry, err = s.manager.RefreshTorrentByRdID(hash, rdID)
 	} else {
 		entry, err = s.manager.RefreshTorrent(hash)

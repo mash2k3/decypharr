@@ -445,6 +445,31 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 	}
 }
 
+func torboxDisplayName(apiName, infoHash, fileRoot string) string {
+	name := strings.TrimSpace(apiName)
+	if name != "" && !strings.EqualFold(name, infoHash) && !isHexInfoHash(name) {
+		return apiName
+	}
+
+	fallback := strings.TrimSpace(fileRoot)
+	if fallback != "" && fallback != "." && fallback != "/" {
+		return fallback
+	}
+	return apiName
+}
+
+func isHexInfoHash(value string) bool {
+	if len(value) != 40 && len(value) != 64 {
+		return false
+	}
+	for _, r := range value {
+		if !((r >= '0' && r <= '9') || (r >= 'a' && r <= 'f') || (r >= 'A' && r <= 'F')) {
+			return false
+		}
+	}
+	return true
+}
+
 func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	var res InfoResponse
 
@@ -505,6 +530,8 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 	}
 
 	t.OriginalFilename = strings.Split(cleanPath, "/")[0]
+	t.Name = torboxDisplayName(t.Name, t.InfoHash, t.OriginalFilename)
+	t.Filename = t.Name
 	t.Debrid = tb.config.Name
 
 	return t, nil
@@ -600,6 +627,8 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 	}
 
 	t.OriginalFilename = strings.Split(cleanPath, "/")[0]
+	t.Name = torboxDisplayName(t.Name, t.InfoHash, t.OriginalFilename)
+	t.Filename = t.Name
 	t.Debrid = tb.config.Name
 	return nil
 }
