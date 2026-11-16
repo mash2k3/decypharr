@@ -9,6 +9,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/Tensai75/nzbparser"
@@ -43,6 +44,47 @@ type NZBParser struct {
 	manager       *nntp.Client // Connection manager for parsing operations
 	maxConcurrent int          // Max concurrent connections
 	par2Descs     []Par2FileDesc
+	// set by processFileGroups when the main content failed and only a small
+	// leftover (usually an unlabelled sample) parsed
+	incomplete error
+}
+
+// leftoverRatio: when an archive group fails, the largest file that did parse
+// must be at least this fraction of the largest failed group, or the NZB is
+// rejected.
+const leftoverRatio = 4
+
+// leftoverOnly returns an error when archive groups failed and the largest
+// file that parsed is too small to be the content (less than 1/leftoverRatio
+// of the largest failed group).
+//
+// It compares largest against largest, not totals, so a season pack where
+// some episodes' RAR sets failed still imports the episodes that parsed (each
+// is about the size of a failed set), while a lone sample left next to a
+// failed main archive is rejected.
+func leftoverOnly(files []storage.NZBFile, largestFailedGroup int64) error {
+	if largestFailedGroup <= 0 {
+		return nil
+	}
+	var largestKept int64
+	for _, f := range files {
+		largestKept = max(largestKept, f.Size)
+	}
+	if largestKept*leftoverRatio >= largestFailedGroup {
+		return nil
+	}
+	return fmt.Errorf("main archive failed to parse (%d MB unreadable); largest other file that parsed is %d MB",
+		largestFailedGroup>>20, largestKept>>20)
+}
+
+func groupBytes(g *FileGroup) int64 {
+	var n int64
+	for _, f := range g.Files {
+		for _, s := range f.Segments {
+			n += int64(s.Bytes)
+		}
+	}
+	return n
 }
 
 type fileAnalysisResult struct {
@@ -348,8 +390,12 @@ func (p *NZBParser) Process(ctx context.Context, nzb *storage.NZB, groups map[st
 
 	// Parse each group (with deferred archive option)
 	p.par2Descs = nil
+	p.incomplete = nil
 	files := p.processFileGroups(ctx, groups, nzb.Password)
 
+	if p.incomplete != nil {
+		return nil, p.incomplete
+	}
 	if len(files) == 0 {
 		return nil, fmt.Errorf("no valid files found in NZB")
 	}
@@ -932,10 +978,18 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 		MaxGoroutines: p.maxConcurrent,
 	}
 
+	var failedMu sync.Mutex
+	var largestFailedGroup int64
 	results := mapper.Map(fileGroups, func(g *FileGroup) []*storage.NZBFile {
 		files, err := p.processFileGroup(ctx, g, password)
 		if err != nil {
 			p.logger.Warn().Err(err).Str("group", g.BaseName).Msg("Failed to process file group")
+			switch g.Type {
+			case storage.NZBFileTypeRar, storage.NZBFileTypeSevenZip, storage.NZBFileTypeZip, storage.NZBFileTypeUnknown:
+				failedMu.Lock()
+				largestFailedGroup = max(largestFailedGroup, groupBytes(g))
+				failedMu.Unlock()
+			}
 			return nil
 		}
 		return files
@@ -960,6 +1014,18 @@ func (p *NZBParser) processFileGroups(ctx context.Context, groups map[string]*Fi
 				}
 			}
 		}
+	}
+
+	// The main archive failed (missing first volume, missing articles) and only
+	// a small file survived - e.g. an unlabelled sample "238235-0.mkv" next to
+	// a 2.4 GB RAR set. Serving it would put a one-minute clip in the library.
+	// Skip it when the context ended: groups then fail from the timeout or
+	// cancel, not because the release is incomplete, and the caller needs the
+	// timeout error rather than "main archive failed to parse".
+	if err := leftoverOnly(files, largestFailedGroup); err != nil && ctx.Err() == nil {
+		p.logger.Warn().Err(err).Int("kept_files", len(files)).Msg("Rejecting NZB: main archive failed and only a small leftover parsed")
+		p.incomplete = err
+		return nil
 	}
 
 	// Count deferred archives

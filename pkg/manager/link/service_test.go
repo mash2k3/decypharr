@@ -160,3 +160,34 @@ func TestFetchLinkNilRepairerOnEmptyLink(t *testing.T) {
 		t.Fatal("expected entry to be marked Bad after empty link with no repairer")
 	}
 }
+
+type fakeDeleteLinkClient struct {
+	debrid.Client
+	deleted []string
+}
+
+func (f *fakeDeleteLinkClient) DeleteLink(dl types.DownloadLink) error {
+	f.deleted = append(f.deleted, dl.DownloadLink)
+	return nil
+}
+
+// A CDN URL that expires mid-stream must be forgotten in both places it is
+// cached (validation map and account link cache), or every retry reuses it.
+func TestInvalidateLinkDropsValidatedAndAccountLink(t *testing.T) {
+	client := &fakeDeleteLinkClient{}
+	clients := xsync.NewMap[string, debrid.Client]()
+	clients.Store("torbox", client)
+	svc := New(clients, nil, nil, nil, nil, 0, zerolog.Nop())
+
+	link := types.DownloadLink{Debrid: "torbox", Link: "f", DownloadLink: "https://cdn.example/x"}
+	svc.validated.Store(link.DownloadLink, nil)
+
+	svc.InvalidateLink(link)
+
+	if _, ok := svc.validated.Load(link.DownloadLink); ok {
+		t.Error("link still marked validated")
+	}
+	if len(client.deleted) != 1 || client.deleted[0] != link.DownloadLink {
+		t.Errorf("account link not deleted: %v", client.deleted)
+	}
+}

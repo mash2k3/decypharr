@@ -13,8 +13,6 @@ import (
 	"strings"
 	"time"
 
-	json "github.com/bytedance/sonic"
-
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/customerror"
@@ -119,10 +117,10 @@ func (ad *AllDebrid) doAccountRequest(account *account.Account, endpoint string,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -154,10 +152,10 @@ func (ad *AllDebrid) doRequest(endpoint string, queryParams map[string]string, r
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -198,10 +196,10 @@ func (ad *AllDebrid) doPostFile(endpoint string, fileData []byte, result any) (*
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -260,6 +258,38 @@ func (ad *AllDebrid) addMagnetLink(torrent *types.Torrent) (*types.Torrent, erro
 	torrent.Id = strconv.Itoa(magnet.ID)
 	torrent.Added = time.Now()
 	return torrent, nil
+}
+
+// magnetStatus is the torrent status for a magnet. AllDebrid reports an
+// uncached magnet Ready (4) slightly before its file links are published; it
+// stays downloading until every file has a link, so completion never runs
+// against an empty file list. (Upstream 6a0a1ec.)
+func magnetStatus(data magnetInfo) types.TorrentStatus {
+	status := getAlldebridStatus(data.StatusCode)
+	if status == types.TorrentStatusDownloaded && !magnetLinksReady(data.Files) {
+		return types.TorrentStatusDownloading
+	}
+	return status
+}
+
+// magnetLinksReady reports whether files holds at least one file and every
+// file has a link.
+func magnetLinksReady(files []MagnetFile) bool {
+	if len(files) == 0 {
+		return false
+	}
+	for _, f := range files {
+		if f.Elements != nil {
+			if !magnetLinksReady(f.Elements) {
+				return false
+			}
+			continue
+		}
+		if f.Link == "" {
+			return false
+		}
+	}
+	return true
 }
 
 func getAlldebridStatus(statusCode int) types.TorrentStatus {
@@ -332,7 +362,7 @@ func (ad *AllDebrid) GetTorrent(torrentId string) (*types.Torrent, error) {
 	if err != nil {
 		return nil, err
 	}
-	status := getAlldebridStatus(data.StatusCode)
+	status := magnetStatus(data)
 	name := data.Filename
 	t := &types.Torrent{
 		Id:               strconv.Itoa(data.Id),
@@ -377,7 +407,7 @@ func (ad *AllDebrid) updateTorrent(t *types.Torrent) (int, error) {
 	if err != nil {
 		return 0, err
 	}
-	status := getAlldebridStatus(data.StatusCode)
+	status := magnetStatus(data)
 	name := data.Filename
 	t.Name = name
 	t.Status = status
@@ -446,6 +476,10 @@ func (ad *AllDebrid) CheckStatus(torrent *types.Torrent) (*types.Torrent, error)
 		ad.logger.Info().Msgf("Torrent: %s downloaded", torrent.Name)
 		return torrent, nil
 	case types.TorrentStatusDownloading:
+		// Ready but its links are not published yet: still processing.
+		if statusCode == 4 {
+			return torrent, nil
+		}
 		if !torrent.DownloadUncached {
 			return torrent, fmt.Errorf("torrent: %s not cached", torrent.Name)
 		}
@@ -522,14 +556,14 @@ func (ad *AllDebrid) restartTorrent(torrentID string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("alldebrid API error: Status: %d", resp.StatusCode)
 	}
 
 	var result restartMagnetResponse
-	if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := request.DecodeJSON(resp, &result); err != nil {
 		return fmt.Errorf("decode AllDebrid restart response: %w", err)
 	}
 	if result.Error != nil {
@@ -666,14 +700,14 @@ func (ad *AllDebrid) CheckFile(ctx context.Context, _, link string) error {
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("alldebrid API error: Status: %d", resp.StatusCode)
 	}
 
 	var data LinkInfosResponse
-	if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := request.DecodeJSON(resp, &data); err != nil {
 		return err
 	}
 	if data.Status != "success" {

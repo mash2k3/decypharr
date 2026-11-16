@@ -80,6 +80,14 @@ func NewManager(debridConf config.Debrid, downloadRL ratelimit.Limiter, logger z
 		}
 	}
 	m.current.Store(firstAccount)
+
+	if store := newLinkStore(debridConf.Name); store != nil {
+		store.load(m)
+		m.accounts.Range(func(_ string, acc *Account) bool {
+			acc.onLinksChanged = func() { store.scheduleSave(m) }
+			return true
+		})
+	}
 	return m
 }
 

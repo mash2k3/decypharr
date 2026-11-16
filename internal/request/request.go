@@ -108,23 +108,8 @@ func WithProxy(proxyURL string) ClientOption {
 
 // Do performs an HTTP request with retries for certain status codes
 func (c *Client) Do(req *http.Request) (*http.Response, error) {
-	// Apply headers
-	c.headersMu.RLock()
-	if c.headers != nil {
-		for key, value := range c.headers {
-			req.Header.Set(key, value)
-		}
-	}
-	c.headersMu.RUnlock()
-
-	// Apply rate limiting
-	if c.rateLimiter != nil {
-		select {
-		case <-req.Context().Done():
-			return nil, req.Context().Err()
-		default:
-			c.rateLimiter.Take()
-		}
+	if err := c.prepare(req); err != nil {
+		return nil, err
 	}
 
 	// Convert to retryablehttp request
@@ -134,6 +119,37 @@ func (c *Client) Do(req *http.Request) (*http.Response, error) {
 	}
 
 	return c.client.Do(retryReq)
+}
+
+// DoOnce performs exactly one HTTP request, whatever the client's retry
+// settings. Use it for endpoints with a tight per-call quota, where a retry
+// only spends more of it. (Upstream PR #444.)
+func (c *Client) DoOnce(req *http.Request) (*http.Response, error) {
+	if err := c.prepare(req); err != nil {
+		return nil, err
+	}
+	return c.httpClient.Do(req)
+}
+
+// prepare applies the client's headers and rate limit to req.
+func (c *Client) prepare(req *http.Request) error {
+	c.headersMu.RLock()
+	if c.headers != nil {
+		for key, value := range c.headers {
+			req.Header.Set(key, value)
+		}
+	}
+	c.headersMu.RUnlock()
+
+	if c.rateLimiter != nil {
+		select {
+		case <-req.Context().Done():
+			return req.Context().Err()
+		default:
+			c.rateLimiter.Take()
+		}
+	}
+	return nil
 }
 
 // MakeRequest performs an HTTP request and returns the response body as bytes
@@ -267,14 +283,13 @@ func New(options ...ClientOption) *Client {
 			return false, ctx.Err()
 		}
 
-		// First use the default retry policy for error handling
-		// This handles the case when resp is nil (network errors)
-		shouldRetry, defaultErr := retryablehttp.DefaultRetryPolicy(ctx, resp, err)
-		if defaultErr != nil {
-			return false, defaultErr
-		}
-		if shouldRetry {
-			return true, nil
+		// Use the default policy for transport errors only. HTTP responses are
+		// retried only for the client's configured statuses: the default policy
+		// retries every 5xx and, once it gives up, returns no response, which
+		// threw away provider error bodies (e.g. RealDebrid's 503 with
+		// error_code 19 for a dead file). (Upstream e633bc9.)
+		if err != nil || resp == nil {
+			return retryablehttp.DefaultRetryPolicy(ctx, resp, err)
 		}
 
 		// Check for retryable status codes (only if resp is not nil)

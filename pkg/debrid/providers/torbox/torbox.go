@@ -2,6 +2,7 @@ package torbox
 
 import (
 	"bytes"
+	"cmp"
 	"context"
 	"fmt"
 	"io"
@@ -48,7 +49,21 @@ type Torbox struct {
 	downloadPresentCache  sync.Map
 	downloadPresentMu     sync.Mutex
 	downloadPresentLoaded bool
+
+	// createtorrent has its own TorBox limit (60/hour at the time of writing),
+	// separate from the 300/min API cap, and every call counts, including
+	// add_only_if_cached refusals. Once TorBox refuses an add, further adds are
+	// rejected locally until this time instead of each one waiting ~30s for
+	// another 429. (Upstream PR #444.)
+	addPauseMu    sync.Mutex
+	addPauseUntil time.Time
 }
+
+// defaultAddLimitPause is used when TorBox refuses an add without Retry-After.
+const defaultAddLimitPause = 5 * time.Minute
+
+// maxAddLimitPause caps an unusually large Retry-After from TorBox.
+const maxAddLimitPause = time.Hour
 
 func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, error) {
 	cfg := config.Get()
@@ -70,6 +85,15 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 		mainRL = ratelimit.New(300, ratelimit.Per(time.Minute), ratelimit.WithSlack(30))
 	}
 
+	// TorBox's cap counts per API key. requestdl now goes through the account
+	// client, so when the download keys are just the main key it must share the
+	// main bucket; two buckets on one key could emit ~550/min against a 300/min
+	// cap. (Upstream 3a0e0e2.)
+	downloadRL := mainRL
+	if !onlyUsesKey(dc.DownloadAPIKeys, dc.APIKey) && ratelimits["download"] != nil {
+		downloadRL = ratelimits["download"]
+	}
+
 	opts := []request.ClientOption{
 		request.WithHeaders(headers),
 		request.WithRateLimiter(mainRL),
@@ -88,13 +112,24 @@ func New(dc config.Debrid, ratelimits map[string]ratelimit.Limiter) (*Torbox, er
 	tb := &Torbox{
 		Host:                  "https://api.torbox.app/v1",
 		APIKey:                dc.APIKey,
-		accountsManager:       account.NewManager(dc, ratelimits["download"], _log),
+		accountsManager:       account.NewManager(dc, downloadRL, _log),
 		config:                dc,
 		autoExpiresLinksAfter: autoExpiresLinksAfter,
 		client:                request.New(opts...),
 		logger:                _log,
 	}
 	return tb, nil
+}
+
+// onlyUsesKey reports whether the download keys are just the main key, in
+// which case download traffic spends the same per-key budget as everything else.
+func onlyUsesKey(downloadKeys []string, apiKey string) bool {
+	for _, key := range downloadKeys {
+		if key != "" && key != apiKey {
+			return false
+		}
+	}
+	return true
 }
 
 func (tb *Torbox) Config() config.Debrid {
@@ -107,6 +142,11 @@ func (tb *Torbox) Logger() zerolog.Logger {
 
 // doGet performs a GET request and unmarshals the response
 func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result interface{}) (*http.Response, error) {
+	return tb.doGetWithClient(tb.client, endpoint, queryParams, result)
+}
+
+// doGetWithClient is doGet through a specific (per-account) client.
+func (tb *Torbox) doGetWithClient(client *request.Client, endpoint string, queryParams map[string]string, result interface{}) (*http.Response, error) {
 	u, err := url.Parse(tb.Host + endpoint)
 	if err != nil {
 		return nil, err
@@ -125,14 +165,14 @@ func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result i
 		return nil, err
 	}
 
-	resp, err := tb.client.Do(req)
+	resp, err := client.Do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -142,6 +182,16 @@ func (tb *Torbox) doGet(endpoint string, queryParams map[string]string, result i
 
 // doPostForm performs a POST request with form data
 func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result interface{}) (*http.Response, error) {
+	return tb.postForm(endpoint, formData, result, false)
+}
+
+// doPostFormOnce is doPostForm without retries, for endpoints with their own
+// tight TorBox limit where a retry only burns more of it.
+func (tb *Torbox) doPostFormOnce(endpoint string, formData map[string]string, result interface{}) (*http.Response, error) {
+	return tb.postForm(endpoint, formData, result, true)
+}
+
+func (tb *Torbox) postForm(endpoint string, formData map[string]string, result interface{}, once bool) (*http.Response, error) {
 	form := url.Values{}
 	for k, v := range formData {
 		form.Set(k, v)
@@ -153,14 +203,18 @@ func (tb *Torbox) doPostForm(endpoint string, formData map[string]string, result
 	}
 	req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 
-	resp, err := tb.client.Do(req)
+	do := tb.client.Do
+	if once {
+		do = tb.client.DoOnce
+	}
+	resp, err := do(req)
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -189,10 +243,10 @@ func (tb *Torbox) doPostJSON(endpoint string, payload any, result any) (*http.Re
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -268,7 +322,41 @@ func (tb *Torbox) isCached(hash string) (cached bool, known bool) {
 	return false, true
 }
 
+// addsPausedUntil returns when adds may resume, or zero if they are allowed now.
+func (tb *Torbox) addsPausedUntil() time.Time {
+	tb.addPauseMu.Lock()
+	defer tb.addPauseMu.Unlock()
+	if time.Now().Before(tb.addPauseUntil) {
+		return tb.addPauseUntil
+	}
+	return time.Time{}
+}
+
+// pauseAdds records a TorBox add-limit refusal and returns when adds resume.
+func (tb *Torbox) pauseAdds(resp *http.Response) time.Time {
+	wait := defaultAddLimitPause
+	if ra := resp.Header.Get("Retry-After"); ra != "" {
+		if secs, err := strconv.Atoi(ra); err == nil && secs > 0 {
+			wait = time.Duration(secs) * time.Second
+		} else if t, err := http.ParseTime(ra); err == nil && time.Until(t) > 0 {
+			wait = time.Until(t)
+		}
+	}
+	wait = min(wait, maxAddLimitPause)
+
+	tb.addPauseMu.Lock()
+	defer tb.addPauseMu.Unlock()
+	if until := time.Now().Add(wait); until.After(tb.addPauseUntil) {
+		tb.addPauseUntil = until
+	}
+	return tb.addPauseUntil
+}
+
 func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
+	if until := tb.addsPausedUntil(); !until.IsZero() {
+		return nil, fmt.Errorf("torbox add limit reached, torrent adds paused until %s", until.Local().Format("15:04:05"))
+	}
+
 	var data AddMagnetResponse
 
 	formData := map[string]string{
@@ -291,20 +379,35 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 		}
 	}
 
-	resp, err := tb.doPostForm("/api/torrents/createtorrent", formData, &data)
+	// Sent once: TorBox holds an over-limit add ~30s before its 429, so the
+	// client's retries would hang a single grab for minutes and spend more of
+	// the add limit.
+	resp, err := tb.doPostFormOnce("/api/torrents/createtorrent", formData, &data)
 	if err != nil {
 		return nil, err
+	}
+
+	if resp.StatusCode == http.StatusTooManyRequests {
+		until := tb.pauseAdds(resp)
+		tb.logger.Warn().Msgf("TorBox add limit reached, pausing torrent adds until %s", until.Local().Format("15:04:05"))
+		return nil, fmt.Errorf("torbox add limit reached, torrent adds paused until %s", until.Local().Format("15:04:05"))
 	}
 
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return nil, fmt.Errorf("torbox API error: Status: %d", resp.StatusCode)
 	}
-	if data.Data == nil {
+	// An array response can list several torrents; take the one for this hash.
+	var id int
+	for _, added := range data.Data {
+		if len(data.Data) == 1 || strings.EqualFold(added.Hash, torrent.InfoHash) {
+			id = cmp.Or(added.TorrentId, added.Id)
+			break
+		}
+	}
+	if id == 0 {
 		return nil, fmt.Errorf("error adding torrent")
 	}
-	dt := *data.Data
-	torrentId := strconv.Itoa(dt.Id)
-	torrent.Id = torrentId
+	torrent.Id = strconv.Itoa(id)
 	torrent.Debrid = tb.config.Name
 	torrent.Added = time.Now()
 
@@ -320,6 +423,10 @@ func (tb *Torbox) getTorboxStatus(status string, finished bool) types.TorrentSta
 		"forcedUP", "allocating", "downloading", "metaDL", "pausedDL",
 		"queuedDL", "checkingDL", "forcedDL", "checkingResumeData", "moving",
 		"incomplete",
+		// A new uncached torrent starts as "queued", then "checking", before
+		// downloading. Treating them as errors failed healthy adds.
+		// (Upstream 3448c74, PR #473.)
+		"queued", "checking",
 	}
 
 	downloaded := []string{
@@ -546,6 +653,15 @@ func (tb *Torbox) DeleteTorrent(torrentId string) error {
 	return nil
 }
 
+const (
+	// TorBox doesn't document how long a CDN URL lives. Re-resolving hourly is
+	// one requestdl call per open file per hour; an earlier expiry is caught
+	// by the stream's 400/403/410 refetch.
+	cdnLinkLifetime = time.Hour
+	// How long the redirect-URL fallback is kept before resolving again.
+	redirectFallbackLifetime = 5 * time.Minute
+)
+
 func (tb *Torbox) GetDownloadLink(id string, file *types.File) (types.DownloadLink, error) {
 	return tb.accountsManager.GetDownloadLink(id, file, tb.fetchDownloadLink)
 }
@@ -560,8 +676,41 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 	downloadURL := fmt.Sprintf("%s/api/torrents/requestdl?%s", tb.Host, query.Encode())
 
 	now := time.Now()
+	expiresAt := now.Add(tb.autoExpiresLinksAfter)
 
-	// Always expires
+	// Resolve the CDN URL once, through the rate-limited client. Streaming the
+	// redirect URL makes every range read (every Plex scan/analysis read) a
+	// requestdl call against TorBox's account-wide API limit. The CDN URL is
+	// kept for at most cdnLinkLifetime and refetched when the CDN rejects it.
+	// If resolving fails, fall back to the redirect URL but only briefly, so
+	// the next open tries to resolve again.
+	client := account.Client()
+	if client == nil {
+		client = tb.client
+	}
+	var res DownloadLinksResponse
+	resp, err := tb.doGetWithClient(client, "/api/torrents/requestdl", map[string]string{
+		"token":      account.Token,
+		"torrent_id": id,
+		"file_id":    file.Id,
+		"redirect":   "false",
+	}, &res)
+	if err == nil && resp.StatusCode == http.StatusOK && res.Success && res.Data != nil && strings.HasPrefix(*res.Data, "http") {
+		downloadURL = *res.Data
+		if cdnExp := now.Add(cdnLinkLifetime); cdnExp.Before(expiresAt) {
+			expiresAt = cdnExp
+		}
+	} else {
+		status := 0
+		if resp != nil {
+			status = resp.StatusCode
+		}
+		tb.logger.Debug().Err(err).Int("status", status).Str("torrent_id", id).Msg("requestdl redirect=false failed, using redirect URL")
+		if fbExp := now.Add(redirectFallbackLifetime); fbExp.Before(expiresAt) {
+			expiresAt = fbExp
+		}
+	}
+
 	dl := types.DownloadLink{
 		Filename:     file.Name,
 		Size:         file.Size,
@@ -571,7 +720,7 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 		Debrid:       tb.config.Name,
 		Id:           file.Id,
 		Generated:    now,
-		ExpiresAt:    now.Add(tb.autoExpiresLinksAfter),
+		ExpiresAt:    expiresAt,
 	}
 	return dl, nil
 }

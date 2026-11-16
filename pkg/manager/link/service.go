@@ -514,6 +514,19 @@ func (s *Service) invalidateAndRefetch(ctx context.Context, entry *storage.Entry
 	return s.fetchLink(ctx, entry, link.Filename, attempt)
 }
 
+// InvalidateLink forgets a link the CDN has rejected mid-stream (expired
+// presigned URL), so the next GetLink fetches a fresh one instead of reusing
+// the cached, already-validated URL.
+func (s *Service) InvalidateLink(link types.DownloadLink) {
+	s.validated.Delete(link.DownloadLink)
+	if link.Debrid == "" {
+		return
+	}
+	if client, err := s.getClient(link.Debrid); err == nil {
+		_ = client.DeleteLink(link)
+	}
+}
+
 // Clear removes all validation tracking entries
 func (s *Service) Clear() {
 	s.validated.Clear()

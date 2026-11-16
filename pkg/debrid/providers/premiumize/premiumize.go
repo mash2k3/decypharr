@@ -111,7 +111,7 @@ func (pm *Premiumize) do(req *http.Request, out any) (*http.Response, error) {
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -501,7 +501,11 @@ func (pm *Premiumize) fetchDownloadLink(acc *account.Account, id string, file *t
 	link := file.Link
 	size := file.Size
 	filename := file.Name
-	if link == "" && file.Id != "" {
+	// Re-mint from the item whenever we have its id: file.Link is the link
+	// from when the transfer was listed and goes dead after about a day, so
+	// reusing it after a link expires hands back the same dead URL.
+	// (Upstream 990f403.)
+	if file.Id != "" {
 		item, err := pm.itemDetails(file.Id)
 		if err != nil {
 			return types.DownloadLink{}, err
@@ -519,7 +523,7 @@ func (pm *Premiumize) fetchDownloadLink(acc *account.Account, id string, file *t
 		Token:        acc.Token,
 		Filename:     filename,
 		Size:         size,
-		Link:         link,
+		Link:         cmp.Or(file.Link, link),
 		DownloadLink: link,
 		Generated:    now,
 		ExpiresAt:    now.Add(pm.autoExpiresLinksAfter),
@@ -543,7 +547,7 @@ func (pm *Premiumize) CheckFile(ctx context.Context, infohash, fileID string) er
 		if err != nil {
 			return err
 		}
-		defer resp.Body.Close()
+		defer request.DrainAndClose(resp.Body)
 		if resp.StatusCode == http.StatusNotFound || resp.StatusCode == http.StatusGone {
 			return customerror.HosterUnavailableError
 		}
@@ -584,7 +588,7 @@ func (pm *Premiumize) getClientProfile(client *request.Client) (*types.Profile, 
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return nil, err
@@ -668,7 +672,7 @@ func (pm *Premiumize) SpeedTest(ctx context.Context) types.SpeedTestResult {
 		result.Error = fmt.Sprintf("latency test failed: %v", err)
 		return result
 	}
-	resp.Body.Close()
+	request.DrainAndClose(resp.Body)
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		result.Error = fmt.Sprintf("latency test unexpected status: %d", resp.StatusCode)
 		return result

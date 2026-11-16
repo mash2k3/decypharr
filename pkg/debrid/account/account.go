@@ -24,6 +24,16 @@ type Account struct {
 	DisableCount atomic.Int32 `json:"disable_count"`
 	// disabledAt is when the account was last disabled (unix nanoseconds, 0 if never).
 	disabledAt atomic.Int64
+
+	// onLinksChanged is called after the link cache changes (set by Manager to
+	// save links to disk); nil in tests.
+	onLinksChanged func()
+}
+
+func (a *Account) linksChanged() {
+	if a.onLinksChanged != nil {
+		a.onLinksChanged()
+	}
 }
 
 func (a *Account) Equals(other *Account) bool {
@@ -51,6 +61,12 @@ func (a *Account) sliceFileLink(fileLink string) string {
 func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetcher) (types.DownloadLink, error) {
 	slicedLink := a.sliceFileLink(file.Link)
 	dl, ok := a.links.Load(slicedLink)
+	if ok && !dl.ExpiresAt.IsZero() && time.Now().After(dl.ExpiresAt) {
+		// Expired: drop it and fetch a fresh one rather than serve a dead URL.
+		a.links.Delete(slicedLink)
+		a.linksChanged()
+		ok = false
+	}
 	if !ok {
 		var err error
 		dl, err = fetcher(a, id, file)
@@ -68,10 +84,12 @@ func (a *Account) GetDownloadLink(id string, file *types.File, fetcher LinkFetch
 func (a *Account) storeLink(dl types.DownloadLink) {
 	slicedLink := a.sliceFileLink(dl.Link)
 	a.links.Store(slicedLink, dl)
+	a.linksChanged()
 }
 func (a *Account) DeleteLink(link types.DownloadLink, deleter LinkDeleter) error {
 	slicedLink := a.sliceFileLink(link.Link)
 	a.links.Delete(slicedLink)
+	a.linksChanged()
 	if deleter != nil {
 		return deleter(a, link)
 	}
@@ -79,6 +97,7 @@ func (a *Account) DeleteLink(link types.DownloadLink, deleter LinkDeleter) error
 }
 func (a *Account) ClearDownloadLinks() {
 	a.links.Clear()
+	a.linksChanged()
 }
 func (a *Account) DownloadLinksCount() int {
 	return a.links.Size()
