@@ -236,6 +236,9 @@ func (p *ProviderEntry) NeedsUpdate(remote *debridTypes.Torrent) bool {
 	if p.ID != remote.Id {
 		return true // Re-added on debrid with a different ID
 	}
+	if remote.SummaryOnly {
+		return false
+	}
 	if p.Status != remote.Status {
 		return true // Status changed (e.g., downloading → downloaded)
 	}

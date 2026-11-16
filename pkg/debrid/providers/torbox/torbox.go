@@ -564,6 +564,7 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 		t.InfoHash = data.Hash
 	}
 	t.Debrid = tb.config.Name
+	t.SummaryOnly = false
 
 	t.Files = make(map[string]types.File)
 
@@ -782,6 +783,7 @@ func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 			Files:            make(map[string]types.File),
 			Added:            data.CreatedAt,
 			InfoHash:         data.Hash,
+			SummaryOnly:      true,
 		}
 
 		for _, f := range data.Files {
