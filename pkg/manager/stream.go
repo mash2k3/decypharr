@@ -153,6 +153,10 @@ func (m *Manager) GetActiveStreamsCount() int {
 	return m.activeStreams.Size()
 }
 
+// minLinkAgeForRefetch: a link younger than this that the CDN rejects is not
+// refetched mid-stream (see streamHTTP).
+const minLinkAgeForRefetch = time.Minute
+
 type StreamError struct {
 	Err       error
 	Retryable bool
@@ -382,11 +386,16 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	case http.StatusBadRequest, http.StatusForbidden, http.StatusGone:
 		// Presigned CDN URL expired after it was validated (TorBox/RD links
 		// are cached for a while). Drop it so the retry fetches a fresh one.
-		m.linkService.InvalidateLink(downloadLink)
-		return StreamError{
-			Err:       fmt.Errorf("download link rejected (HTTP %d), refetching", resp.StatusCode),
-			Retryable: true,
-			LinkError: true,
+		// Only for a link that has been in use a while: a just-minted link
+		// that is rejected isn't expired, and refetching it in a loop mints a
+		// link per retry - which AllDebrid suspends accounts for.
+		if time.Since(downloadLink.Generated) >= minLinkAgeForRefetch {
+			m.linkService.InvalidateLink(downloadLink)
+			return StreamError{
+				Err:       fmt.Errorf("download link rejected (HTTP %d), refetching", resp.StatusCode),
+				Retryable: true,
+				LinkError: true,
+			}
 		}
 	case http.StatusTooManyRequests,
 		http.StatusInternalServerError,
