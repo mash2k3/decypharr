@@ -13,8 +13,6 @@ import (
 	"sync"
 	"time"
 
-	json "github.com/bytedance/sonic"
-
 	"github.com/sirrobot01/decypharr/internal/customerror"
 	"github.com/sirrobot01/decypharr/internal/request"
 	"github.com/sirrobot01/decypharr/internal/utils"
@@ -124,10 +122,10 @@ func (r *RealDebrid) doGet(endpoint string, result interface{}) (*http.Response,
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -152,10 +150,10 @@ func (r *RealDebrid) doPostForm(endpoint string, formData map[string]string, res
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -182,10 +180,10 @@ func (r *RealDebrid) doPut(endpoint string, body []byte, contentType string, res
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -217,10 +215,10 @@ func (r *RealDebrid) doGetWithClient(client *request.Client, fullURL string, que
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if result != nil && resp.StatusCode >= 200 && resp.StatusCode < 300 && resp.ContentLength != 0 {
-		if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+		if err := request.DecodeJSON(resp, result); err != nil {
 			return resp, err
 		}
 	}
@@ -245,17 +243,17 @@ func (r *RealDebrid) doPostFormWithClient(client *request.Client, fullURL string
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
 		if result != nil && resp.ContentLength != 0 {
-			if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(result); err != nil {
+			if err := request.DecodeJSON(resp, result); err != nil {
 				return resp, err
 			}
 		}
 	} else {
 		if errorResult != nil && resp.ContentLength != 0 {
-			if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(errorResult); err != nil {
+			if err := request.DecodeJSON(resp, errorResult); err != nil {
 				return resp, err
 			}
 		}
@@ -687,6 +685,8 @@ func (r *RealDebrid) DeleteTorrent(torrentId string) error {
 	if err != nil {
 		return err
 	}
+	defer request.DrainAndClose(resp.Body)
+
 	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
 		return fmt.Errorf("realdebrid API error: Status: %d", resp.StatusCode)
 	}
@@ -762,7 +762,7 @@ func (r *RealDebrid) CheckFile(ctx context.Context, infohash, link string) error
 	if err != nil {
 		return err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if resp.StatusCode == http.StatusNotFound {
 		return customerror.HosterUnavailableError
@@ -848,7 +848,7 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 	if err != nil {
 		return 0, torrents, err
 	}
-	defer resp.Body.Close()
+	defer request.DrainAndClose(resp.Body)
 
 	if resp.StatusCode == http.StatusNoContent {
 		return 0, torrents, nil
@@ -859,7 +859,7 @@ func (r *RealDebrid) getTorrents(offset int, limit int) (int, []*types.Torrent, 
 	}
 
 	var data []TorrentsResponse
-	if err := json.ConfigDefault.NewDecoder(resp.Body).Decode(&data); err != nil {
+	if err := request.DecodeJSON(resp, &data); err != nil {
 		return 0, torrents, err
 	}
 
@@ -1082,9 +1082,11 @@ func (r *RealDebrid) deleteDownloadLink(account *account.Account, downloadLink t
 		return err
 	}
 
-	if _, err = account.Client().Do(req); err != nil {
+	resp, err := account.Client().Do(req)
+	if err != nil {
 		return err
 	}
+	request.DrainAndClose(resp.Body)
 	return nil
 }
 
