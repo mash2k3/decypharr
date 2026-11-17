@@ -252,10 +252,14 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 		// Build segments for this file across all its volume parts
 		fileSegments, err := p.buildSegmentsForFile(rarFile, baseSegments, volumeOffsetMap)
 		if err != nil {
+			p.logger.Warn().Err(err).Str("file", name).Int("volume_parts", len(rarFile.VolumeParts)).
+				Msg("RAR file has no streamable segments; skipping it")
 			continue
 		}
 
 		if len(fileSegments) == 0 {
+			p.logger.Warn().Str("file", name).Int("volume_parts", len(rarFile.VolumeParts)).
+				Msg("RAR file mapped to no segments; skipping it")
 			continue
 		}
 
@@ -1204,6 +1208,10 @@ func (p *RARParser) buildSegmentsForFile(
 	// Parse each volume part of this file
 	for _, part := range rarFile.VolumeParts {
 		if part.UnpackedSize <= 0 {
+			if len(rarFile.VolumeParts) > 1 {
+				p.logger.Debug().Str("file", rarFile.Name).Str("volume", part.Name).Int("part", part.PartNumber).
+					Msg("RAR volume part carries no data for this file")
+			}
 			continue
 		}
 
@@ -1212,10 +1220,21 @@ func (p *RARParser) buildSegmentsForFile(
 		// part.UnpackedSize = how many bytes of the file are in this part (this is what we stream!)
 		partSegments, err := p.buildSegmentsForVolumePart(part, baseSegments, volumeOffsetMap)
 		if err != nil {
+			// A whole volume's share of the file is dropped here: the file
+			// gets a hole of this size (Message-ID collision volume loss,
+			// Alone S06E01 part032.rar). Logged so the cause can be found.
+			p.logger.Warn().Err(err).Str("file", rarFile.Name).Str("volume", part.Name).
+				Int("part", part.PartNumber).Int64("bytes_lost", part.UnpackedSize).
+				Int64("data_offset", part.DataOffset).
+				Msg("RAR volume dropped from file: its segments could not be mapped")
 			continue
 		}
 
 		if len(partSegments) == 0 {
+			p.logger.Warn().Str("file", rarFile.Name).Str("volume", part.Name).
+				Int("part", part.PartNumber).Int64("bytes_lost", part.UnpackedSize).
+				Int64("data_offset", part.DataOffset).
+				Msg("RAR volume dropped from file: no segments cover its data")
 			continue
 		}
 

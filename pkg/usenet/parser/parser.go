@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"html"
 	"path/filepath"
 	"regexp"
 	"sort"
@@ -183,6 +184,7 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to parse NZB content: %w", err)
 	}
+	unescapeSegmentIDs(raw)
 
 	// Create base NZB structure
 	nzb = &storage.NZB{
@@ -1533,4 +1535,20 @@ func (p *NZBParser) detectFileTypeFromContent(data []byte) storage.NZBFileType {
 	}
 
 	return storage.NZBFileTypeUnknown
+}
+
+// unescapeSegmentIDs decodes XML entities in message-ids. nzbparser keeps a
+// <segment>'s inner XML raw, so an id like "a&amp;b@x" was sent to the
+// server escaped, answered 430 and looked missing (a false dead file).
+func unescapeSegmentIDs(raw *nzbparser.Nzb) {
+	if raw == nil {
+		return
+	}
+	for i := range raw.Files {
+		for j := range raw.Files[i].Segments {
+			if id := raw.Files[i].Segments[j].Id; strings.Contains(id, "&") {
+				raw.Files[i].Segments[j].Id = html.UnescapeString(id)
+			}
+		}
+	}
 }
