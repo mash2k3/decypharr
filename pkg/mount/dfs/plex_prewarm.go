@@ -3,6 +3,7 @@ package dfs
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -18,6 +19,7 @@ import (
 	"github.com/sirrobot01/decypharr/internal/logger"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/manager"
+	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
 	"github.com/sirrobot01/decypharr/pkg/mount/dfs/vfs"
 )
 
@@ -326,6 +328,10 @@ func pickMountChild(children []mountChild, base string, allowOnlyVideo bool) int
 		if strings.EqualFold(child.Name(), base) {
 			return i
 		}
+		// Plex reports an extra under the name the mount lists it as.
+		if l, ok := child.(interface{ ListName() string }); ok && strings.EqualFold(l.ListName(), base) {
+			return i
+		}
 		if child.Size() >= minPlausibleEpisodeSize {
 			videos++
 			only = i
@@ -380,13 +386,50 @@ func findFileByBasename(mgr *manager.Manager, basename string) *manager.FileInfo
 
 // startPlexSessionPoller runs until ctx is cancelled when Plex credentials are
 // configured and either prewarm or playback protection is enabled.
+// sessionSource is one media server polled for playback sessions: Plex, or
+// Jellyfin/Emby (jellyfin_sessions.go).
+type sessionSource struct {
+	name  string
+	fetch func(ctx context.Context) ([]plexSession, error)
+	next  func(ctx context.Context, s plexSession) plexEpisodeTarget
+}
+
+// sessionSources returns every configured media server.
+func (m *Manager) sessionSources(client *http.Client) []sessionSource {
+	var out []sessionSource
+	if u, t := m.config.PlexURL, m.config.PlexToken; u != "" && t != "" {
+		out = append(out, sessionSource{
+			name:  "Plex",
+			fetch: func(ctx context.Context) ([]plexSession, error) { return fetchPlexSessions(ctx, client, u, t) },
+			next: func(ctx context.Context, s plexSession) plexEpisodeTarget {
+				return fetchNextEpisodeFilenameAcrossSeasons(ctx, client, u, t, s)
+			},
+		})
+	}
+	if u, t := m.config.JellyfinURL, m.config.JellyfinToken; u != "" && t != "" {
+		out = append(out, sessionSource{
+			name:  "Jellyfin/Emby",
+			fetch: func(ctx context.Context) ([]plexSession, error) { return fetchJellyfinSessions(ctx, client, u, t) },
+			next: func(ctx context.Context, s plexSession) plexEpisodeTarget {
+				return fetchJellyfinNextEpisode(ctx, client, u, t, s)
+			},
+		})
+	}
+	return out
+}
+
+// startPlexSessionPoller runs until ctx is cancelled when a media server
+// (Plex, Jellyfin/Emby) is configured and show precache or stream
+// protection needs it.
 func (m *Manager) startPlexSessionPoller(ctx context.Context) {
-	if m.config.PlexURL == "" || m.config.PlexToken == "" {
+	client := &http.Client{Timeout: 10 * time.Second}
+	sources := m.sessionSources(client)
+	if len(sources) == 0 {
 		if m.config.PrewarmNextEpisode {
-			m.logger.Warn().Msg("Prewarm: prewarm_next_episode is enabled but plex_url/plex_token are not set - nothing will happen")
+			m.logger.Warn().Msg("Show precache: enabled but no media server (Plex, or Jellyfin/Emby URL and API key) is set - nothing will happen")
 		}
 		if m.manager != nil && m.manager.InteractivePoolReserveEnabled() {
-			m.logger.Warn().Msg("Playback protection: enabled but plex_url/plex_token are not set - protection inactive")
+			m.logger.Warn().Msg("Stream protection: enabled but no media server (Plex, or Jellyfin/Emby URL and API key) is set - protection inactive")
 		}
 		return
 	}
@@ -396,24 +439,27 @@ func (m *Manager) startPlexSessionPoller(ctx context.Context) {
 
 	log := logger.Default()
 	seen := &prewarmedSessions{entries: make(map[string]time.Time)}
-	client := &http.Client{Timeout: 10 * time.Second}
 
 	go func() {
 		ticker := time.NewTicker(plexPollInterval)
 		defer ticker.Stop()
-		pollPlexSessionsOnce(ctx, client, m.config.PlexURL, m.config.PlexToken, m.manager, m.vfs, seen, log, m.config.PrewarmMaxBytes)
+		pollSessionsOnce(ctx, sources, m.manager, m.vfs, seen, log, m.config.PrewarmMaxBytes)
 		for {
 			select {
 			case <-ctx.Done():
 				return
 			case <-ticker.C:
-				pollPlexSessionsOnce(ctx, client, m.config.PlexURL, m.config.PlexToken, m.manager, m.vfs, seen, log, m.config.PrewarmMaxBytes)
+				pollSessionsOnce(ctx, sources, m.manager, m.vfs, seen, log, m.config.PrewarmMaxBytes)
 			}
 		}
 	}()
-	log.Info().Str("plex_url", m.config.PlexURL).Dur("interval", plexPollInterval).
+	names := make([]string, 0, len(sources))
+	for _, src := range sources {
+		names = append(names, src.name)
+	}
+	log.Info().Strs("servers", names).Dur("interval", plexPollInterval).
 		Int64("max_bytes", m.config.PrewarmMaxBytes).
-		Msg("Plex: started session poller")
+		Msg("Media servers: started session poller")
 }
 
 func (m *Manager) plexSessionPollNeeded() bool {
@@ -428,7 +474,16 @@ func (m *Manager) startPlexPrewarmPoller(ctx context.Context) {
 	m.startPlexSessionPoller(ctx)
 }
 
+// pollPlexSessionsOnce polls one Plex server (kept for tests and callers
+// that only know Plex).
 func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, plexToken string, mgr *manager.Manager, vfsMgr *vfs.Manager, seen *prewarmedSessions, log zerolog.Logger, maxBytes int64) {
+	m := &Manager{config: &fuseconfig.FuseConfig{PlexURL: plexURL, PlexToken: plexToken}}
+	pollSessionsOnce(ctx, m.sessionSources(client), mgr, vfsMgr, seen, log, maxBytes)
+}
+
+// pollSessionsOnce polls every media server once: stream protection gets
+// the mount files they play, show precache the next episodes.
+func pollSessionsOnce(ctx context.Context, sources []sessionSource, mgr *manager.Manager, vfsMgr *vfs.Manager, seen *prewarmedSessions, log zerolog.Logger, maxBytes int64) {
 	prewarmEnabled := false
 	protectionEnabled := false
 	if cfg := config.Get(); cfg != nil {
@@ -438,25 +493,42 @@ func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, ple
 		protectionEnabled = mgr.InteractivePoolReserveEnabled()
 	}
 
-	sessions, err := fetchPlexSessions(ctx, client, plexURL, plexToken)
-	if err != nil {
-		log.Warn().Err(err).Msg("Plex: failed to fetch sessions")
-		if protectionEnabled && mgr != nil {
-			mgr.ClearPlexProtectedStreams(err)
+	// Every server's sessions; nextOf[i] finds the episode after
+	// sessions[i] on the server it came from.
+	var sessions []plexSession
+	var nextOf []func(context.Context, plexSession) plexEpisodeTarget
+	var failed []string
+	for _, src := range sources {
+		got, err := src.fetch(ctx)
+		if err != nil {
+			log.Warn().Err(err).Str("server", src.name).Msg("Media servers: failed to fetch sessions")
+			failed = append(failed, src.name+": "+err.Error())
+			continue
 		}
+		for range got {
+			nextOf = append(nextOf, src.next)
+		}
+		sessions = append(sessions, got...)
+	}
+	if len(failed) > 0 && protectionEnabled && mgr != nil {
+		// A server that can't be asked may be playing something: protect
+		// nothing rather than the wrong set (every read counts as playback).
+		mgr.ClearPlexProtectedStreams(errors.New(strings.Join(failed, "; ")))
+	}
+	if len(failed) == len(sources) {
 		return
 	}
 
-	if protectionEnabled && mgr != nil {
+	if protectionEnabled && mgr != nil && len(failed) == 0 {
 		before := mgr.PlexProtectedStreamCount()
 		protected := resolveProtectedStreams(mgr, sessions)
 		mgr.SetPlexProtectedStreams(protected)
 		switch {
 		case len(protected) > 0 && len(protected) != before:
-			log.Info().Int("sessions", len(sessions)).Int("protected", len(protected)).Msg("Plex: protected streams updated")
+			log.Info().Int("sessions", len(sessions)).Int("protected", len(protected)).Msg("Stream protection: protected streams updated")
 		case len(sessions) > 0 && len(protected) == 0:
 			if shouldLogPlexUnmatched(time.Now()) {
-				log.Info().Int("sessions", len(sessions)).Msg("Plex: active sessions but no mount file match yet")
+				log.Info().Int("sessions", len(sessions)).Msg("Stream protection: active sessions but no mount file match yet")
 			}
 		}
 	}
@@ -467,7 +539,7 @@ func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, ple
 
 	seen.evictExpired()
 
-	for _, s := range sessions {
+	for i, s := range sessions {
 		if s.Type != "episode" || s.Duration <= 0 || s.ParentIndex <= 0 || s.Index <= 0 || s.GrandparentTitle == "" {
 			continue
 		}
@@ -476,14 +548,14 @@ func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, ple
 		}
 		if seen.markIfNew(s.RatingKey) {
 			log.Info().Str("show", s.GrandparentTitle).Int("season", s.ParentIndex).Int("episode", s.Index).
-				Msg("Prewarm: Plex session crossed threshold, looking for next episode")
+				Msg("Show precache: session crossed threshold, looking for next episode")
 
 			// Primary path: ask Plex which episode comes next. First try its
 			// basename verbatim; cli_debrid may have renamed the symlink Plex
 			// sees while cli_mount still tracks the original release filename,
 			// so fall back to matching the parsed show/season/episode identity.
 			var next *manager.FileInfo
-			target := fetchNextEpisodeFilenameAcrossSeasons(ctx, client, plexURL, plexToken, s)
+			target := nextOf[i](ctx, s)
 			if target.Filename != "" {
 				// Plex sees cli_debrid's renamed symlink; the release name it was
 				// made from sits in its trailing parentheses.
@@ -525,10 +597,10 @@ func pollPlexSessionsOnce(ctx context.Context, client *http.Client, plexURL, ple
 				} else {
 					event = event.Str("attempted", fmt.Sprintf("S%02dE%02d and S%02dE01", s.ParentIndex, s.Index+1, s.ParentIndex+1))
 				}
-				event.Msg("Prewarm: no matching next episode found among active torrents/jobs")
+				event.Msg("Show precache: no matching next episode found among active torrents/jobs")
 				continue
 			}
-			log.Info().Str("show", s.GrandparentTitle).Str("nextFile", next.Name()).Msg("Prewarm: starting fetch of next episode")
+			log.Info().Str("show", s.GrandparentTitle).Str("nextFile", next.Name()).Msg("Show precache: starting fetch of next episode")
 			go prewarmFile(vfsMgr, next, log, maxBytes)
 		}
 	}
@@ -730,7 +802,7 @@ func matchesEpisodeIdentity(wantTitle string, wantSeason, wantEp int, entryParse
 func prewarmFile(vfsMgr *vfs.Manager, info *manager.FileInfo, log zerolog.Logger, maxBytes int64) {
 	sf, err := vfsMgr.GetFile(info)
 	if err != nil {
-		log.Warn().Str("file", info.Name()).Err(err).Msg("Prewarm: failed to open next episode")
+		log.Warn().Str("file", info.Name()).Err(err).Msg("Show precache: failed to open next episode")
 		return
 	}
 	defer func() {
@@ -775,10 +847,10 @@ func prewarmFile(vfsMgr *vfs.Manager, info *manager.FileInfo, log zerolog.Logger
 
 	if readErr != nil && off < want {
 		log.Warn().Str("file", info.Name()).Int64("bytes", off).Int64("wanted", want).Err(readErr).
-			Msg("Prewarm: stopped early")
+			Msg("Show precache: stopped early")
 		return
 	}
-	log.Info().Str("file", info.Name()).Int64("bytes", off).Msg("Prewarm: complete")
+	log.Info().Str("file", info.Name()).Int64("bytes", off).Msg("Show precache: complete")
 }
 
 // normalizeEpisodeTitle makes two title strings comparable regardless of

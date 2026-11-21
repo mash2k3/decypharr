@@ -144,7 +144,7 @@ func (f *FS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst
 			_, children = f.vfs.GetManager().GetTorrentChildrenWithSidecars(groupOrTorrent)
 		}
 		for _, child := range children {
-			fill(child.Name(), f.entryStat(&child), 0)
+			fill(child.ListName(), f.entryStat(&child), 0)
 		}
 		return 0
 	}
@@ -156,7 +156,7 @@ func (f *FS) Readdir(path string, fill func(name string, stat *fuse.Stat_t, ofst
 	// get the torrent's children (files)
 	_, children := f.vfs.GetManager().GetTorrentChildrenWithSidecars(torrentName)
 	for _, child := range children {
-		fill(child.Name(), f.entryStat(&child), 0)
+		fill(child.ListName(), f.entryStat(&child), 0)
 	}
 
 	return 0

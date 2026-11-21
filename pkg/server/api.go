@@ -14,6 +14,7 @@ import (
 	json "github.com/bytedance/sonic"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/google/uuid"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/arr"
@@ -52,6 +53,9 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 	debridName := r.FormValue("debrid")
 	callbackUrl := r.FormValue("callbackUrl")
 	downloadFolder := r.FormValue("downloadFolder")
+	// id: keep this job id for a single NZB (moving a library back from
+	// cli_debrid's built-in mount, whose records refer to jobs by id).
+	keepID := strings.TrimSpace(r.FormValue("id"))
 	if downloadFolder == "" {
 		downloadFolder = cfg.DownloadFolder
 	}
@@ -189,6 +193,12 @@ func (s *Server) handleAddContent(w http.ResponseWriter, r *http.Request) {
 
 		case "nzb":
 			importReq := manager.NewNZBRequest(task.name, downloadFolder, task.nzbContent, _arr, config.DownloadAction(action), callbackUrl, manager.ImportTypeAPI, skipMultiSeason)
+			if keepID != "" {
+				if err := s.checkKeepID(keepID, len(tasks)); err != nil {
+					return &manager.ImportRequest{Status: "error", Error: err.Error()}
+				}
+				importReq.Id = keepID
+			}
 			nzoID, err := s.manager.AddNewNZB(ctx, importReq)
 			if err != nil {
 				s.logger.Error().Err(err).Str("source", task.source).Msg("Failed to add NZB")
@@ -1391,4 +1401,21 @@ func (s *Server) handleRegisterCliIDs(w http.ResponseWriter, r *http.Request) {
 
 	s.logger.Info().Str("hash", hash).Int("ids", len(incoming)).Msg("Registered cli_debrid IDs")
 	utils.JSONResponse(w, map[string]interface{}{"ok": true, "registered": len(incoming)}, http.StatusOK)
+}
+
+// checkKeepID validates a caller-chosen job id: one NZB per request, a
+// UUID, and not already in use.
+func (s *Server) checkKeepID(id string, tasks int) error {
+	if tasks != 1 {
+		return fmt.Errorf("id can only be given with a single NZB")
+	}
+	if _, err := uuid.Parse(id); err != nil || len(id) != 36 {
+		return fmt.Errorf("id %q is not a UUID", id)
+	}
+	if ok, err := s.manager.EntryExists(id); err != nil {
+		return fmt.Errorf("checking id %s: %w", id, err)
+	} else if ok {
+		return fmt.Errorf("a job with id %s already exists", id)
+	}
+	return nil
 }

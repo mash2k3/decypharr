@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 
@@ -37,9 +38,21 @@ type FileInfo struct {
 	sys          interface{} // For caching fuse nodes
 	category     string
 	tags         []string
+	// listName is the name the mount lists (an extra's "-featurette" etc.
+	// suffix); name stays the real file name for streaming and storage.
+	listName string
 }
 
-func (f *FileInfo) Name() string         { return f.name }
+func (f *FileInfo) Name() string { return f.name }
+
+// ListName is the name shown in directory listings (Name unless the file
+// is listed as an extra, see extras.go).
+func (f *FileInfo) ListName() string {
+	if f.listName != "" {
+		return f.listName
+	}
+	return f.name
+}
 func (f *FileInfo) Size() int64          { return f.size }
 func (f *FileInfo) Mode() os.FileMode    { return f.mode }
 func (f *FileInfo) ModTime() time.Time   { return f.modTime }
@@ -201,6 +214,16 @@ func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error
 		return nil, fmt.Errorf("torrent %s not found", torrentName)
 	}
 	file, err := entry.GetFile(fileName)
+	names := entryExtraNames(entry)
+	if err != nil {
+		// A listed extra name ("...-featurette.mkv") maps back to its file.
+		for real, listed := range names {
+			if listed == fileName {
+				file, err = entry.GetFile(real)
+				break
+			}
+		}
+	}
 	if err != nil {
 		// Fall back to sidecar — look up by the entry's InfoHash (from first file)
 		if first, ferr := entry.GetFirstFile(); ferr == nil && first.InfoHash != "" {
@@ -213,6 +236,7 @@ func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error
 	return &FileInfo{
 		infohash:  file.InfoHash,
 		name:      file.Name,
+		listName:  names[file.Name],
 		size:      file.Size,
 		modTime:   file.AddedOn,
 		isDir:     false,
@@ -220,6 +244,18 @@ func (m *Manager) GetTorrentFile(torrentName, fileName string) (*FileInfo, error
 		canDelete: true,
 		byteRange: file.ByteRange,
 	}, nil
+}
+
+// entryExtraNames: real -> listed name of an entry's extra videos.
+func entryExtraNames(entry *storage.EntryItem) map[string]string {
+	files := make([]namedFile, 0, len(entry.Files))
+	for _, f := range entry.Files {
+		if f != nil && !f.Deleted {
+			files = append(files, namedFile{name: f.Name, size: f.Size})
+		}
+	}
+	sort.Slice(files, func(i, j int) bool { return files[i].name < files[j].name }) // stable picks
+	return extraNames(files)
 }
 
 // getEntryChildren
@@ -414,6 +450,11 @@ func (m *Manager) getTorrentChildren(name string) (*FileInfo, []FileInfo) {
 	}
 	if len(infos) == 0 {
 		return nil, nil
+	}
+	if names := entryExtraNames(entry); names != nil {
+		for i := range infos {
+			infos[i].listName = names[infos[i].name]
+		}
 	}
 
 	currentDir := &FileInfo{

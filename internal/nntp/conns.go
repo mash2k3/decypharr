@@ -643,18 +643,30 @@ func (c *Connection) GetDecodedBodyWithMetadata(messageID string) ([]byte, *Yenc
 }
 
 func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
+	n, _, err := c.StreamBodyPart(messageID, w)
+	return n, err
+}
+
+// YencPart is the part numbering an article's yEnc header claims.
+type YencPart struct {
+	Part, Total int64
+}
+
+// StreamBodyPart is StreamBody that also returns the article's yEnc part
+// number (0 when the header has none).
+func (c *Connection) StreamBodyPart(messageID string, w io.Writer) (int64, YencPart, error) {
 	messageID = FormatMessageID(messageID)
 	if err := c.sendCommandArg("BODY", messageID); err != nil {
-		return 0, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
+		return 0, YencPart{}, NewConnectionError(fmt.Errorf("failed to send BODY command: %w", err))
 	}
 
 	code, message, err := c.readResponseCodeWithDeadline(timeouts.StreamBodyTimeout)
 	if err != nil {
-		return 0, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
+		return 0, YencPart{}, NewConnectionError(fmt.Errorf("failed to read body response: %w", err))
 	}
 
 	if code != 222 {
-		return 0, classifyNNTPError(code, string(message))
+		return 0, YencPart{}, classifyNNTPError(code, string(message))
 	}
 
 	dec := nntpyenc.AcquireDecoder(c.reader)
@@ -662,10 +674,11 @@ func (c *Connection) StreamBody(messageID string, w io.Writer) (int64, error) {
 	defer nntpyenc.ReleaseDecoder(dec)
 	n, err := c.copyBodyWithIdleDeadline(w, dec, timeouts.StreamBodyTimeout)
 	c.recordBodyUsage(n)
+	part := YencPart{Part: dec.Meta.PartNumber, Total: dec.Meta.TotalParts}
 	if err != nil {
-		return n, classifyTransferError("streaming yenc decode failed", err)
+		return n, part, classifyTransferError("streaming yenc decode failed", err)
 	}
-	return n, nil
+	return n, part, nil
 }
 
 // readDotBytes reads dot-terminated NNTP data using textproto.DotReader

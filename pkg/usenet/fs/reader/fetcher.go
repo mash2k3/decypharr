@@ -263,7 +263,7 @@ func (sf *SegmentFetcher) fetchBody(downloadCtx context.Context, seg *SegmentMet
 		}
 
 		// Stream the decoded body into the chosen tier.
-		n, err := conn.StreamBody(messageID, writer)
+		n, part, err := conn.StreamBodyPart(messageID, writer)
 		if err != nil {
 			writer.Discard()
 			if ctxErr := downloadCtx.Err(); ctxErr != nil {
@@ -285,6 +285,8 @@ func (sf *SegmentFetcher) fetchBody(downloadCtx context.Context, seg *SegmentMet
 				Message: "article produced no data after decoding",
 			}
 		}
+
+		sf.checkYencPart(seg, messageID, part, n, expected)
 
 		if seg.Bytes > 0 && n < expected && !sf.acceptShortArticles.Load() {
 			writer.Discard()
@@ -310,6 +312,29 @@ func (sf *SegmentFetcher) fetchBody(downloadCtx context.Context, seg *SegmentMet
 
 		return nil
 	})
+}
+
+// checkYencPart logs (only) an article whose yEnc header claims a different
+// part than the segment slot it fills: a Message-ID collision that decodes
+// to the same size or larger than the slot is served as-is today, so this
+// shows whether that ever happens before playback behaviour is changed.
+// NZBs number segments from 1 (some from 0), so both are accepted.
+func (sf *SegmentFetcher) checkYencPart(seg *SegmentMeta, messageID string, part nntp.YencPart, n, expected int64) {
+	if part.Part <= 0 || seg.Number < 0 {
+		return
+	}
+	if part.Part == int64(seg.Number) || part.Part == int64(seg.Number)+1 {
+		return
+	}
+	sf.logger.Warn().
+		Str("message_id", messageID).
+		Int("segment_number", seg.Number).
+		Int64("yenc_part", part.Part).
+		Int64("yenc_total", part.Total).
+		Int64("decoded_bytes", n).
+		Int64("slot_bytes", expected).
+		Bool("served", n >= expected).
+		Msg("yEnc part does not match the segment slot (possible Message-ID collision); logged only")
 }
 
 func (sf *SegmentFetcher) markPrefetchQueued(segIdx int) bool {

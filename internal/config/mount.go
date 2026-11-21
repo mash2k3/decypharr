@@ -96,6 +96,12 @@ type DFS struct {
 	PlexURL   string `json:"plex_url,omitempty"`
 	PlexToken string `json:"plex_token,omitempty"`
 
+	// JellyfinURL and JellyfinToken (an API key) add a Jellyfin or Emby
+	// server (same API) to the same session poll: stream protection and
+	// show precache use the sessions of every configured server.
+	JellyfinURL   string `json:"jellyfin_url,omitempty"`
+	JellyfinToken string `json:"jellyfin_token,omitempty"`
+
 	// PrewarmMaxSize caps a single prewarm fetch, e.g. "256MB". Empty ->
 	// 256MB default. This is a flat cap regardless of the source episode's
 	// own size (a 20% fraction of a 30-70GB file would otherwise dwarf this

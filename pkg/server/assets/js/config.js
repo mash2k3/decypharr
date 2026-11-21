@@ -1614,7 +1614,7 @@ class ConfigManager {
             umask: getElementValue('umask'),
         };
 
-        // Plex-page-only fields: Settings has no inputs for these, so carry
+        // Media-servers-page-only fields: Settings has no inputs for these, so carry
         // forward the last loaded values instead of wiping them on save.
         if (savedDfs.prewarm_next_episode) {
             dfs.prewarm_next_episode = true;
@@ -1629,6 +1629,12 @@ class ConfigManager {
         }
         if (savedDfs.plex_token) {
             dfs.plex_token = savedDfs.plex_token;
+        }
+        if (savedDfs.jellyfin_url) {
+            dfs.jellyfin_url = savedDfs.jellyfin_url;
+        }
+        if (savedDfs.jellyfin_token) {
+            dfs.jellyfin_token = savedDfs.jellyfin_token;
         }
 
         return dfs;
