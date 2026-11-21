@@ -58,6 +58,12 @@ type Client struct {
 
 	interactive *interactiveState
 
+	// balanced: Usenet.PrimaryLoadMode "balanced" - the least-loaded
+	// provider of a tier is tried first instead of the highest-priority
+	// one with a free slot. rr rotates the start among equal loads.
+	balanced bool
+	rr       atomic.Uint64
+
 	// TCP socket buffer sizes (bytes) applied to every new connection. 0 means
 	// "leave OS autotuning untouched". Sized from cfg.Usenet.Socket*Buffer.
 	// At high RTT the receive buffer is the single-connection throughput cap
@@ -280,6 +286,10 @@ func NewClient(cfg *config.Config, metricStores ...*hybrid.Store) (*Client, erro
 			}
 		}
 	}
+	cm.balanced = LoadBalanced(cfg.Usenet.PrimaryLoadMode)
+	if cm.balanced {
+		cm.logger.Info().Msg("primary providers: balanced load")
+	}
 	cm.repairPool = cm.newRepairPool(cfg.Repair.NNTPConnectionPercent)
 	cm.interactive = newInteractiveState(cfg)
 	cm.logInteractiveConfig(cfg)
@@ -404,6 +414,7 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 	// one provider plus a timeout on another proves nothing.
 	var lastTransientErr error
 	var exclusions providerExclusions
+	hint := missHintFrom(ctx)
 
 	for providerAttempts := 0; providerAttempts < len(c.providers); providerAttempts++ {
 		if ctx.Err() != nil {
@@ -439,8 +450,14 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		pendingErr := c.safeExecute(currentConn, fn)
 		if pendingErr == nil {
 			c.returnOrReleaseConn(currentConn, currentProvider)
+			if hint != nil {
+				hint.hit(currentProvider.Host)
+			}
 			return nil
 		}
+		// switchedErr is the transient error that made the retry move to
+		// another provider (see below); that first provider never answered.
+		var switchedErr error
 		err = retry.Do(
 			func() error {
 				execErr := pendingErr
@@ -479,6 +496,9 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 						if connErr != nil {
 							return retry.Unrecoverable(connErr)
 						}
+						if newProvider.Host != failedProvider.Host {
+							switchedErr = execErr
+						}
 						currentConn = newConn
 						currentProvider = newProvider
 						return execErr // Retriable
@@ -514,6 +534,9 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		// Success
 		if err == nil {
 			c.returnOrReleaseConn(currentConn, currentProvider)
+			if hint != nil {
+				hint.hit(currentProvider.Host)
+			}
 			return nil
 		}
 
@@ -521,25 +544,41 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 		c.returnOrReleaseConn(currentConn, currentProvider)
 		lastErr = err
 
+		// The answer below came from currentProvider. If a retry moved there
+		// from connProvider, connProvider only failed transiently: it is
+		// done for this call, and its failure keeps the result from being
+		// proof (it never said the article was missing).
+		answered := connProvider
+		if currentProvider.Host != "" {
+			answered = currentProvider
+		}
+		if switchedErr != nil && answered.Host != connProvider.Host {
+			exclusions.excludeHost(connProvider.Host)
+			lastTransientErr = switchedErr
+		}
+
 		// Check if we should exclude this provider
 		var nntpErr *Error
 		if errors.As(err, &nntpErr) {
 			switch nntpErr.Type {
 			case ErrorTypeArticleNotFound:
-				excludeForArticleNotFound(&exclusions, connProvider)
+				excludeForArticleNotFound(&exclusions, answered)
+				if hint != nil {
+					hint.miss(answered.Host)
+				}
 			case ErrorTypeArticleMismatch:
 				// Only this host: providers sharing a backbone have been
 				// seen to disagree on what a Message-ID holds.
-				exclusions.excludeHost(connProvider.Host)
+				exclusions.excludeHost(answered.Host)
 			case ErrorTypeConnection, ErrorTypeTimeout, ErrorTypeServerBusy:
-				exclusions.excludeHost(connProvider.Host)
+				exclusions.excludeHost(answered.Host)
 				lastTransientErr = err
 			default:
 				// Non-retriable error, return immediately
 				return err
 			}
 		} else if customerror.IsPanicError(err) {
-			exclusions.excludeHost(connProvider.Host)
+			exclusions.excludeHost(answered.Host)
 			lastTransientErr = err
 		} else {
 			// Unknown error type - return immediately
@@ -603,8 +642,10 @@ func (c *Client) safeExecute(conn *Connection, fn func(conn *Connection) error) 
 // block providers from being billed for articles the primary could have
 // served given a moment's patience.
 //
-// Within a tier, providers are still consumed opportunistically across
-// hosts — so two unlimited primaries split load the way they do today.
+// Within a tier, fill-first mode (the default) takes the highest-priority
+// provider with a free slot, so the first one carries the load and the
+// others only take overflow. Balanced mode (Usenet.PrimaryLoadMode) tries
+// the least-loaded provider of the tier first; see balancedOrder.
 func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions providerExclusions) (*Connection, config.UsenetProvider, error) {
 	if err := c.waitBackgroundBudget(ctx); err != nil {
 		return nil, config.UsenetProvider{}, err
@@ -631,8 +672,12 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 
 	// Phase 1: Non-blocking scan - try to get a free slot from any provider
 	// within the current tier.
+	scan := c.providers
+	if c.balanced {
+		scan = c.balancedOrder(ctx, exclusions, useBackups)
+	}
 	eligibleCount := 0
-	for _, provider := range c.providers {
+	for _, provider := range scan {
 		if provider.Backup != useBackups || exclusions.excludes(provider) {
 			continue
 		}

@@ -44,6 +44,10 @@ type SegmentFetcher struct {
 	// only re-download each one from every provider.
 	acceptShortArticles atomic.Bool
 
+	// miss remembers which providers keep lacking this file's articles;
+	// in balanced load mode they are asked last for its segments.
+	miss nntp.MissHint
+
 	// Lifecycle
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -250,7 +254,7 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 // that belongs to another file.
 func (sf *SegmentFetcher) fetchBody(downloadCtx context.Context, seg *SegmentMeta, segIdx int, messageID string) error {
 	expected := seg.SegmentDataStart + seg.Bytes
-	return sf.client.ExecuteWithFailover(downloadCtx, func(conn *nntp.Connection) error {
+	return sf.client.ExecuteWithFailover(nntp.WithMissHint(downloadCtx, &sf.miss), func(conn *nntp.Connection) error {
 		stopCancel := context.AfterFunc(downloadCtx, func() {
 			_ = conn.Close()
 		})

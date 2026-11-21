@@ -410,6 +410,16 @@
                                                 <span class="text-sm opacity-70">Connections per file for parsing and NZB downloads</span>
                                             </div>
                                             <div>
+                                                <label class="label" for="usenet.primary_load_mode">
+                                                    <span class="font-medium">Primary Server Load</span>
+                                                </label>
+                                                <select class="select w-full" name="usenet.primary_load_mode" id="usenet.primary_load_mode">
+                                                    <option value="fill">Fill first (default)</option>
+                                                    <option value="balanced">Balanced</option>
+                                                </select>
+                                                <span class="text-sm opacity-70">Fill first uses the highest-priority primary until it is full. Balanced spreads requests over all primaries by how busy each is. Backups are only used for articles the primaries don't have, in both modes. Applies after a restart.</span>
+                                            </div>
+                                            <div>
                                                 <label class="label" for="usenet.read_ahead">
                                                     <span class="font-medium">Read Ahead</span>
                                                 </label>

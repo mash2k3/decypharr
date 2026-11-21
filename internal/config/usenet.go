@@ -74,6 +74,13 @@ type Usenet struct {
 	// many newly-added episodes at once and otherwise compete with playback
 	// for the shared NNTP connection pool.
 	PreCacheOnOpen bool `json:"pre_cache_on_open,omitempty"`
+	// PrimaryLoadMode is how requests are spread over the primary (non-backup)
+	// providers. "" / "fill" (default): the highest-priority primary with a
+	// free slot takes the request, so the first one carries the load until it
+	// is full. "balanced": the least-loaded primary (slots in use over its
+	// max) is tried first, rotating between equal ones. Backups are never part
+	// of it; failover and "missing on every provider" proof are unchanged.
+	PrimaryLoadMode string `json:"primary_load_mode,omitempty"`
 	// InteractivePoolReserveEnabled opts into dynamic NNTP pool reservation during
 	// sustained playback reads. When active, background parse/repair/stat work is
 	// capped so streaming keeps headroom. Default off.
@@ -348,6 +355,9 @@ func (c *Config) applyUsenetEnvVars() {
 
 	if readAhead := getEnv("USENET__READ_AHEAD"); readAhead != "" {
 		c.Usenet.ReadAhead = readAhead
+	}
+	if mode := getEnv("USENET__PRIMARY_LOAD_MODE"); mode != "" {
+		c.Usenet.PrimaryLoadMode = mode
 	}
 	if preCacheOnOpen := getEnv("USENET__PRE_CACHE_ON_OPEN"); preCacheOnOpen != "" {
 		c.Usenet.PreCacheOnOpen = parseBool(preCacheOnOpen)
