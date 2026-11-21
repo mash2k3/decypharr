@@ -647,10 +647,10 @@ func (r *Repair) saveHealth(state *storage.EntryHealth) {
 // to NZB entries, matching the rest of the minimal playback-repair workflow.
 //
 // The FUSE read path only ever sees a generic EIO — the kernel errno
-// boundary erases the original error — so this re-derives the reason using
-// the same permanent-usenet-failure check the sweep already relies on
-// (checkPermanentUsenetFailure), rather than trying to infer it from the
-// read error itself.
+// boundary erases the original error — so this asks the same
+// permanent-usenet-failure check the sweep relies on
+// (checkPermanentUsenetFailure), and marks the file only when it says the
+// data is gone.
 func (r *Repair) RecordLiveReadFailure(infoHash, entryName, fileName string, size int64) {
 	if infoHash == "" || entryName == "" || fileName == "" {
 		return
@@ -660,12 +660,19 @@ func (r *Repair) RecordLiveReadFailure(infoHash, entryName, fileName string, siz
 		return
 	}
 
-	reason := "media_probe_failed"
-	if r.manager.usenet != nil {
-		if permErr := r.manager.usenet.IsFilePermanentlyFailed(infoHash, fileName); permErr != nil {
-			reason = "usenet_segment_missing"
-		}
+	// Only proof marks a file broken: the usenet layer flagged it
+	// permanently failed (articles missing on every provider, or a segment
+	// that decodes short everywhere). A read that failed any other way
+	// (connection errors, retries used up) says nothing about the release,
+	// and marking it sent healthy files into repair. The repair sweep's own
+	// media probe still reports media_probe_failed for files that really
+	// don't play.
+	if r.manager.usenet == nil || r.manager.usenet.IsFilePermanentlyFailed(infoHash, fileName) == nil {
+		r.logger.Debug().Str("entry", entryName).Str("file", fileName).
+			Msg("Live read failed without proof the file is gone; not marking it broken")
+		return
 	}
+	reason := "usenet_segment_missing"
 
 	h, _ := r.manager.storage.GetEntryHealth(entryName)
 	if h == nil {

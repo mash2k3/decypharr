@@ -328,6 +328,10 @@ func pickMountChild(children []mountChild, base string, allowOnlyVideo bool) int
 		if strings.EqualFold(child.Name(), base) {
 			return i
 		}
+		// Plex reports an extra under the name the mount lists it as.
+		if l, ok := child.(interface{ ListName() string }); ok && strings.EqualFold(l.ListName(), base) {
+			return i
+		}
 		if child.Size() >= minPlausibleEpisodeSize {
 			videos++
 			only = i

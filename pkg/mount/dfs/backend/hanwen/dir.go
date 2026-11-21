@@ -243,8 +243,8 @@ func (d *Dir) Readdir(ctx context.Context) (fs.DirStream, syscall.Errno) {
 		}
 		fuseEntries = append(fuseEntries, fuse.DirEntry{
 			Mode: mode,
-			Name: info.Name(),
-			Ino:  d.childStableAttr(info.Name(), mode).Ino,
+			Name: info.ListName(),
+			Ino:  d.childStableAttr(info.ListName(), mode).Ino,
 		})
 	}
 

@@ -136,7 +136,7 @@ func convertToXML(cleanPath string, currentInfo *manager.FileInfo, children []ma
 	if currentInfo != nil {
 		entries = append(entries, entryItem{
 			escHref: xmlEscape(fastEscapePath(cleanPath)),
-			escName: xmlEscape(currentInfo.Name()),
+			escName: xmlEscape(currentInfo.ListName()),
 			isDir:   currentInfo.IsDir(),
 			size:    currentInfo.Size(),
 			modTime: currentInfo.ModTime().Format(time.RFC3339),
@@ -145,7 +145,7 @@ func convertToXML(cleanPath string, currentInfo *manager.FileInfo, children []ma
 
 	for _, info := range children {
 
-		nm := info.Name()
+		nm := info.ListName() // an extra's "-featurette" etc. name (manager/extras.go)
 		// build raw href
 		href := path.Join("/", cleanPath, nm)
 		if info.IsDir() {
