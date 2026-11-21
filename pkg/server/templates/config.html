@@ -417,7 +417,7 @@
                                                     <option value="fill">Fill first (default)</option>
                                                     <option value="balanced">Balanced</option>
                                                 </select>
-                                                <span class="text-sm opacity-70">Fill first uses the highest-priority primary until it is full. Balanced spreads requests over all primaries by how busy each is. Backups are only used for articles the primaries don't have, in both modes. Applies after a restart.</span>
+                                                <span class="text-sm opacity-70">Fill first uses the highest-priority primary until it is full. Balanced spreads requests over all primaries by how busy each is. Backups are only used for articles the primaries don't have, in both modes. Only use Balanced when every primary is an unlimited account: a block (pay per GB) account set as a primary would carry a share of all traffic and burn its data, so put block accounts as Backup. Applies after a restart.</span>
                                             </div>
                                             <div>
                                                 <label class="label" for="usenet.read_ahead">
