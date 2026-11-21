@@ -43,6 +43,8 @@ type FuseConfig struct {
 	PrewarmNextEpisode   bool
 	PlexURL              string
 	PlexToken            string
+	JellyfinURL          string // Jellyfin or Emby, next to (or instead of) Plex
+	JellyfinToken        string
 	PrewarmMaxBytes      int64
 	UsenetPreCacheOnOpen bool
 
@@ -135,6 +137,8 @@ func ParseFuseConfig() *FuseConfig {
 	fuseConfig.PrewarmNextEpisode = cfg.PrewarmNextEpisode
 	fuseConfig.PlexURL = cfg.PlexURL
 	fuseConfig.PlexToken = cfg.PlexToken
+	fuseConfig.JellyfinURL = cfg.JellyfinURL
+	fuseConfig.JellyfinToken = cfg.JellyfinToken
 	fuseConfig.PrewarmMaxBytes = cfg.PrewarmMaxSizeBytes()
 	fuseConfig.UsenetPreCacheOnOpen = mainCfg.Usenet.PreCacheOnOpen
 

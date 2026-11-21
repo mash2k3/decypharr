@@ -15,12 +15,12 @@
     <div class="card bg-base-100 shadow-xl">
         <div class="card-body">
             <h2 class="card-title text-2xl">
-                <i class="bi bi-play-circle mr-2 text-primary"></i>Plex
+                <i class="bi bi-play-circle mr-2 text-primary"></i>Media servers
             </h2>
             <p class="text-sm opacity-70 mt-1">
-                Connect decypharr to Plex using the same <code>/status/sessions</code> poll for
-                <strong>next-episode prewarm</strong> and <strong>playback protection</strong>.
-                Only confirmed Plex viewers count toward NNTP reserve — Bazarr and other mount readers do not.
+                Connect decypharr to Plex and/or Jellyfin or Emby. One session poll of every server drives
+                <strong>show precache</strong> and <strong>stream protection</strong>.
+                Only confirmed viewers count toward NNTP reserve — Bazarr and other mount readers do not.
             </p>
 
             <form id="plexForm" class="mt-6 space-y-6 max-w-3xl">
@@ -33,7 +33,7 @@
                         <input type="text" id="plexUrl" placeholder="http://192.168.1.10:32400"
                                class="input input-bordered w-full" />
                         <label class="label">
-                            <span class="label-text-alt opacity-60">Reachable from decypharr, not necessarily from your browser. Shared by prewarm and playback protection.</span>
+                            <span class="label-text-alt opacity-60">Reachable from decypharr, not necessarily from your browser. Shared by show precache and stream protection.</span>
                         </label>
                     </div>
 
@@ -53,35 +53,59 @@
                     </div>
                 </div>
 
-                <div class="divider">Next-episode prewarm</div>
                 <div class="space-y-4">
+                    <h3 class="font-semibold text-lg">Jellyfin / Emby connection</h3>
                     <div class="form-control">
-                        <label class="label cursor-pointer justify-start gap-3">
-                            <input type="checkbox" id="prewarmEnabled" class="toggle toggle-primary" />
-                            <span class="label-text font-medium">Enable next-episode prewarm</span>
+                        <label class="label" for="jellyfinUrl">
+                            <span class="label-text font-medium">Jellyfin or Emby Server URL</span>
                         </label>
-                        <p class="text-sm opacity-70 ml-12">Once a Plex session crosses ~70% of an episode, fetch the first ~20% of the next episode into cache.</p>
-                    </div>
-                    <div class="form-control">
-                        <label class="label" for="plexMaxSize">
-                            <span class="label-text font-medium">Prewarm size cap</span>
-                        </label>
-                        <input type="text" id="plexMaxSize" placeholder="256MB"
+                        <input type="text" id="jellyfinUrl" placeholder="http://192.168.1.10:8096"
                                class="input input-bordered w-full" />
                         <label class="label">
-                            <span class="label-text-alt opacity-60">Max bytes per next-episode prewarm. Leave blank for 256MB default.</span>
+                            <span class="label-text-alt opacity-60">Optional, next to Plex or instead of it: sessions of every server are used.</span>
+                        </label>
+                    </div>
+                    <div class="form-control">
+                        <label class="label" for="jellyfinToken">
+                            <span class="label-text font-medium">Jellyfin / Emby API key</span>
+                        </label>
+                        <input type="password" id="jellyfinToken" placeholder="API key"
+                               class="input input-bordered w-full" autocomplete="off" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">Dashboard → API Keys (Jellyfin) or Settings → API Keys (Emby).</span>
                         </label>
                     </div>
                 </div>
 
-                <div class="divider">Playback protection</div>
+                <div class="divider">Show precache</div>
+                <div class="space-y-4">
+                    <div class="form-control">
+                        <label class="label cursor-pointer justify-start gap-3">
+                            <input type="checkbox" id="prewarmEnabled" class="toggle toggle-primary" />
+                            <span class="label-text font-medium">Enable show precache</span>
+                        </label>
+                        <p class="text-sm opacity-70 ml-12">Once a session (Plex, Jellyfin or Emby) crosses ~70% of an episode, fetch the first ~20% of the next episode into cache.</p>
+                    </div>
+                    <div class="form-control">
+                        <label class="label" for="plexMaxSize">
+                            <span class="label-text font-medium">Precache size cap</span>
+                        </label>
+                        <input type="text" id="plexMaxSize" placeholder="256MB"
+                               class="input input-bordered w-full" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">Max bytes per show precache. Leave blank for 256MB default.</span>
+                        </label>
+                    </div>
+                </div>
+
+                <div class="divider">Stream protection</div>
                 <div class="space-y-4">
                     <div class="form-control">
                         <label class="label cursor-pointer justify-start gap-3">
                             <input type="checkbox" id="playbackProtectionEnabled" class="checkbox checkbox-warning" />
                             <span class="label-text">
-                                <span class="font-medium block">Protect Plex streams during playback</span>
-                                <span class="text-sm opacity-70">Reserves NNTP connections per confirmed Plex session only while bulk imports are running. Playback alone uses the full pool; Bazarr and pre-cache use the background budget when protection is active.</span>
+                                <span class="font-medium block">Protect media server streams during playback</span>
+                                <span class="text-sm opacity-70">Reserves NNTP connections per confirmed Plex/Jellyfin/Emby session only while bulk imports are running. Playback alone uses the full pool; Bazarr and pre-cache use the background budget when protection is active.</span>
                             </span>
                         </label>
                     </div>
@@ -94,7 +118,7 @@
                                 </label>
                                 <input type="number" id="reservePercent" class="input input-bordered w-full" min="1" max="100" placeholder="15" />
                                 <label class="label">
-                                    <span class="label-text-alt opacity-60">Each Plex stream reserves round(total × percent ÷ 100) connections (min 6), capped by max total protected.</span>
+                                    <span class="label-text-alt opacity-60">Each playing stream reserves round(total × percent ÷ 100) connections (min 6), capped by max total protected.</span>
                                 </label>
                             </div>
                             <div class="form-control">
@@ -210,7 +234,7 @@
         }
         const preview = [1, 2, 3].map((streams) => {
             const snap = computeDynamicReserve(total, streams, percent, 6, max);
-            return `${streams} Plex stream${streams > 1 ? 's' : ''} → ${snap.reserved} protected / ${snap.background} background`;
+            return `${streams} stream${streams > 1 ? 's' : ''} → ${snap.reserved} protected / ${snap.background} background`;
         });
         const perStream = computePerStreamBase(total, percent, 6);
         hint.textContent = `With ${total} configured connections (~${perStream} per stream): ${preview.join(' | ')}`;
@@ -224,6 +248,8 @@
         document.getElementById('prewarmEnabled').checked = !!dfs.prewarm_next_episode;
         document.getElementById('plexUrl').value = dfs.plex_url || '';
         document.getElementById('plexToken').value = dfs.plex_token || '';
+        document.getElementById('jellyfinUrl').value = dfs.jellyfin_url || '';
+        document.getElementById('jellyfinToken').value = dfs.jellyfin_token || '';
         document.getElementById('plexMaxSize').value = dfs.prewarm_max_size || '';
         document.getElementById('playbackProtectionEnabled').checked = !!usenet.interactive_pool_reserve_enabled;
         document.getElementById('maxTotalProtected').value = usenet.interactive_pool_reserve_max || '';
@@ -256,6 +282,8 @@
             cfg.mount.dfs.prewarm_next_episode = document.getElementById('prewarmEnabled').checked;
             cfg.mount.dfs.plex_url = document.getElementById('plexUrl').value.trim();
             cfg.mount.dfs.plex_token = document.getElementById('plexToken').value.trim();
+            cfg.mount.dfs.jellyfin_url = document.getElementById('jellyfinUrl').value.trim();
+            cfg.mount.dfs.jellyfin_token = document.getElementById('jellyfinToken').value.trim();
             cfg.mount.dfs.prewarm_max_size = document.getElementById('plexMaxSize').value.trim();
 
             cfg.usenet = cfg.usenet || {};
