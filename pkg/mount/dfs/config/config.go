@@ -45,6 +45,8 @@ type FuseConfig struct {
 	PlexToken            string
 	JellyfinURL          string // Jellyfin or Emby, next to (or instead of) Plex
 	JellyfinToken        string
+	SiloURL              string // Silo, through its admin API
+	SiloAPIKey           string
 	PrewarmMaxBytes      int64
 	UsenetPreCacheOnOpen bool
 
@@ -139,6 +141,8 @@ func ParseFuseConfig() *FuseConfig {
 	fuseConfig.PlexToken = cfg.PlexToken
 	fuseConfig.JellyfinURL = cfg.JellyfinURL
 	fuseConfig.JellyfinToken = cfg.JellyfinToken
+	fuseConfig.SiloURL = cfg.SiloURL
+	fuseConfig.SiloAPIKey = cfg.SiloAPIKey
 	fuseConfig.PrewarmMaxBytes = cfg.PrewarmMaxSizeBytes()
 	fuseConfig.UsenetPreCacheOnOpen = mainCfg.Usenet.PreCacheOnOpen
 

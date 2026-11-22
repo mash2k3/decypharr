@@ -175,7 +175,7 @@ func (m *Manager) interactiveProtectionEnabled() bool {
 	return cfg != nil && cfg.Usenet.InteractivePoolReserveEnabled
 }
 
-// plexCredentialsConfigured: a media server (Plex, or Jellyfin/Emby) is set
+// plexCredentialsConfigured: a media server (Plex, Jellyfin/Emby or Silo) is set
 // for the session poll that drives stream protection.
 func (m *Manager) plexCredentialsConfigured() bool {
 	cfg := config.Get()
@@ -186,7 +186,8 @@ func (m *Manager) plexCredentialsConfigured() bool {
 		return false
 	}
 	d := cfg.Mount.DFS
-	return d.PlexURL != "" && d.PlexToken != "" || d.JellyfinURL != "" && d.JellyfinToken != ""
+	return d.PlexURL != "" && d.PlexToken != "" || d.JellyfinURL != "" && d.JellyfinToken != "" ||
+		d.SiloURL != "" && d.SiloAPIKey != ""
 }
 
 func (m *Manager) forceDeactivateInteractiveReserve() {

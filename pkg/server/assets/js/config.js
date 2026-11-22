@@ -1637,6 +1637,12 @@ class ConfigManager {
         if (savedDfs.jellyfin_token) {
             dfs.jellyfin_token = savedDfs.jellyfin_token;
         }
+        if (savedDfs.silo_url) {
+            dfs.silo_url = savedDfs.silo_url;
+        }
+        if (savedDfs.silo_api_key) {
+            dfs.silo_api_key = savedDfs.silo_api_key;
+        }
 
         return dfs;
     }

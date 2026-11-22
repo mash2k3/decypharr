@@ -77,6 +77,30 @@
                     </div>
                 </div>
 
+                <div class="space-y-4">
+                    <h3 class="font-semibold text-lg">Silo connection</h3>
+                    <div class="form-control">
+                        <label class="label" for="siloUrl">
+                            <span class="label-text font-medium">Silo Server URL</span>
+                        </label>
+                        <input type="text" id="siloUrl" placeholder="http://192.168.1.10:8090"
+                               class="input input-bordered w-full" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">Optional, next to the others: Silo's playing sessions are used too.</span>
+                        </label>
+                    </div>
+                    <div class="form-control">
+                        <label class="label" for="siloApiKey">
+                            <span class="label-text font-medium">Silo admin API key</span>
+                        </label>
+                        <input type="password" id="siloApiKey" placeholder="sa_..."
+                               class="input input-bordered w-full" autocomplete="off" />
+                        <label class="label">
+                            <span class="label-text-alt opacity-60">Silo → Settings → API Keys (an admin key).</span>
+                        </label>
+                    </div>
+                </div>
+
                 <div class="divider">Show precache</div>
                 <div class="space-y-4">
                     <div class="form-control">
@@ -250,6 +274,8 @@
         document.getElementById('plexToken').value = dfs.plex_token || '';
         document.getElementById('jellyfinUrl').value = dfs.jellyfin_url || '';
         document.getElementById('jellyfinToken').value = dfs.jellyfin_token || '';
+        document.getElementById('siloUrl').value = dfs.silo_url || '';
+        document.getElementById('siloApiKey').value = dfs.silo_api_key || '';
         document.getElementById('plexMaxSize').value = dfs.prewarm_max_size || '';
         document.getElementById('playbackProtectionEnabled').checked = !!usenet.interactive_pool_reserve_enabled;
         document.getElementById('maxTotalProtected').value = usenet.interactive_pool_reserve_max || '';
@@ -284,6 +310,8 @@
             cfg.mount.dfs.plex_token = document.getElementById('plexToken').value.trim();
             cfg.mount.dfs.jellyfin_url = document.getElementById('jellyfinUrl').value.trim();
             cfg.mount.dfs.jellyfin_token = document.getElementById('jellyfinToken').value.trim();
+            cfg.mount.dfs.silo_url = document.getElementById('siloUrl').value.trim();
+            cfg.mount.dfs.silo_api_key = document.getElementById('siloApiKey').value.trim();
             cfg.mount.dfs.prewarm_max_size = document.getElementById('plexMaxSize').value.trim();
 
             cfg.usenet = cfg.usenet || {};
