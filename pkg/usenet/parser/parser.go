@@ -179,6 +179,13 @@ func (p *NZBParser) Parse(ctx context.Context, filename string, content []byte) 
 		}
 	}()
 
+	// Some NZB writers leave subject empty and put the file description in
+	// poster; nzbparser merges files by subject, gluing them into one blob.
+	if fixed, n := normalizeNZBSubjects(content); n > 0 {
+		p.logger.Info().Int("files", n).Str("filename", filename).Msg("NZB had empty subjects; using the poster attribute")
+		content = fixed
+	}
+
 	// Parse raw XML
 	raw, err := nzbparser.Parse(bytes.NewReader(content))
 	if err != nil {

@@ -99,6 +99,9 @@ type RARArchiveInfo struct {
 	// VolumeNumbers holds the volume number read from each input volume's
 	// headers, by input index (-1 if unknown).
 	VolumeNumbers []int
+	// VolumeFileNames lists the member names whose headers each input volume
+	// holds, by input index: volumes sharing a member belong to one set.
+	VolumeFileNames [][]string
 }
 
 // RARFileEntry represents a file within the RAR archive
@@ -181,6 +184,11 @@ func (p *RARParser) Process(ctx context.Context, group *FileGroup, password stri
 	// put the volumes in true order and parse again. Otherwise the volumes are
 	// stitched out of order and the extracted file is unplayable garbage.
 	order, ok := rarVolumeReorder(archiveInfo.VolumeNumbers)
+	if !ok {
+		// Several sets merged into one group (obfuscated per-episode RARs):
+		// numbers repeat, so order each set by its own headers.
+		order, ok = rarVolumeReorderBySets(archiveInfo.VolumeNumbers, archiveInfo.VolumeFileNames)
+	}
 	if !ok {
 		p.logger.Debug().
 			Str("group", group.BaseName).
@@ -383,6 +391,81 @@ func rarVolumeReorder(volumeNumbers []int) ([]int, bool) {
 	return nil, false
 }
 
+// rarVolumeReorderBySets orders volumes of several RAR sets that were grouped
+// together. Volumes holding a part of the same member are one set; each set
+// needs distinct header numbers and is sorted by them, sets one after another
+// (by their first member's name). It reports false when there is only one
+// set, a number is unknown or repeats inside a set, or nothing would move.
+func rarVolumeReorderBySets(volumeNumbers []int, fileNames [][]string) ([]int, bool) {
+	if len(volumeNumbers) < 2 || len(fileNames) != len(volumeNumbers) {
+		return nil, false
+	}
+	parent := make([]int, len(volumeNumbers))
+	for i := range parent {
+		parent[i] = i
+	}
+	find := func(i int) int {
+		for parent[i] != i {
+			parent[i] = parent[parent[i]]
+			i = parent[i]
+		}
+		return i
+	}
+	owner := map[string]int{}
+	for i, n := range volumeNumbers {
+		if n < 0 || len(fileNames[i]) == 0 {
+			return nil, false
+		}
+		for _, name := range fileNames[i] {
+			if j, ok := owner[name]; ok {
+				parent[find(i)] = find(j)
+			} else {
+				owner[name] = i
+			}
+		}
+	}
+	groups := map[int][]int{}
+	var roots []int
+	for i := range volumeNumbers {
+		r := find(i)
+		if _, ok := groups[r]; !ok {
+			roots = append(roots, r)
+		}
+		groups[r] = append(groups[r], i)
+	}
+	if len(groups) < 2 {
+		return nil, false
+	}
+	type set struct {
+		key  string
+		vols []int
+	}
+	sets := make([]set, 0, len(groups))
+	for _, r := range roots {
+		g := groups[r]
+		seen := map[int]bool{}
+		for _, i := range g {
+			if seen[volumeNumbers[i]] {
+				return nil, false
+			}
+			seen[volumeNumbers[i]] = true
+		}
+		sort.SliceStable(g, func(a, b int) bool { return volumeNumbers[g[a]] < volumeNumbers[g[b]] })
+		sets = append(sets, set{fileNames[g[0]][0], g})
+	}
+	sort.SliceStable(sets, func(a, b int) bool { return sets[a].key < sets[b].key })
+	order := make([]int, 0, len(volumeNumbers))
+	for _, s := range sets {
+		order = append(order, s.vols...)
+	}
+	for i, idx := range order {
+		if i != idx {
+			return order, true
+		}
+	}
+	return nil, false
+}
+
 // ParseArchive parses all volumes and extracts file information
 func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, password string) (*RARArchiveInfo, error) {
 	if len(volumes) == 0 {
@@ -518,10 +601,16 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 	var allRawFiles []*RARFileEntry
 	isHeaderEncrypted := false
 	volumeNumbers := make([]int, len(results))
+	volumeFileNames := make([][]string, len(results))
 	for i, result := range results {
 		volumeNumbers[i] = result.volumeNumber
 		if result.err != nil {
 			continue
+		}
+		for _, f := range result.files {
+			if f != nil && !f.IsDirectory {
+				volumeFileNames[i] = append(volumeFileNames[i], f.Name)
+			}
 		}
 		if result.isHeaderEncrypted {
 			isHeaderEncrypted = true
@@ -564,6 +653,7 @@ func (p *RARParser) parseArchive(ctx context.Context, volumes []*types.Volume, p
 		EncryptionKey:     encryptionKey,
 		Files:             files,
 		VolumeNumbers:     volumeNumbers,
+		VolumeFileNames:   volumeFileNames,
 	}
 	return archiveInfo, nil
 }

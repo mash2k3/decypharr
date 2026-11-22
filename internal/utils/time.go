@@ -34,6 +34,9 @@ func (ct *CachedTime) Start() {
 	if ct.running.Swap(true) {
 		return // already running
 	}
+	// Refresh now: until the first tick Now() would otherwise return the
+	// time this CachedTime was created (process start for the global one).
+	ct.update()
 	go ct.run()
 }
 

@@ -361,6 +361,10 @@ func (tb *Torbox) SubmitMagnet(torrent *types.Torrent) (*types.Torrent, error) {
 
 	formData := map[string]string{
 		"magnet": torrent.Magnet.Link,
+		// TorBox's allow_zip defaults to true: a torrent with 100+ files
+		// (big anime / complete-series packs) is then stored as one .zip,
+		// which can't be mounted or streamed per episode.
+		"allow_zip": "false",
 	}
 	if !torrent.DownloadUncached {
 		formData["add_only_if_cached"] = "true"

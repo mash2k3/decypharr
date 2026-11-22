@@ -1,6 +1,7 @@
 package parser
 
 import (
+	"bytes"
 	"fmt"
 	"path"
 	"path/filepath"
@@ -386,4 +387,44 @@ func NormalizeArchivePath(name string) string {
 	trimmed = path.Clean(trimmed)
 	trimmed = strings.Trim(trimmed, "/")
 	return trimmed
+}
+
+var (
+	nzbFileTagRE      = regexp.MustCompile(`(?is)<file\b[^>]*>`)
+	nzbPosterAttrRE   = regexp.MustCompile(`(?is)\bposter\s*=\s*"([^"]*)"`)
+	nzbSubjectAttrRE  = regexp.MustCompile(`(?is)\bsubject\s*=\s*"([^"]*)"`)
+	posterLikeSubject = regexp.MustCompile(`(?i)yenc|&quot;|\.par2|\.rar|\.r\d\d|\.7z|\.mkv|\.mp4|\.avi`)
+)
+
+// normalizeNZBSubjects copies a poster attribute that holds a file
+// description ("x.part01.rar" yEnc (1/50)) into an empty or missing subject,
+// so nzbparser names each file and keeps them apart. NZBs with subjects are
+// returned unchanged. It returns the bytes and how many files it fixed.
+func normalizeNZBSubjects(raw []byte) ([]byte, int) {
+	fixed := 0
+	out := nzbFileTagRE.ReplaceAllFunc(raw, func(tag []byte) []byte {
+		subj := nzbSubjectAttrRE.FindSubmatchIndex(tag)
+		if subj != nil && len(bytes.TrimSpace(tag[subj[2]:subj[3]])) > 0 {
+			return tag
+		}
+		pm := nzbPosterAttrRE.FindSubmatch(tag)
+		if pm == nil || len(bytes.TrimSpace(pm[1])) == 0 || !posterLikeSubject.Match(pm[1]) {
+			return tag
+		}
+		fixed++
+		if subj != nil {
+			t := make([]byte, 0, len(tag)+len(pm[1]))
+			t = append(t, tag[:subj[2]]...)
+			t = append(t, pm[1]...)
+			return append(t, tag[subj[3]:]...)
+		}
+		i := bytes.Index(tag, []byte("<file")) + len("<file")
+		t := make([]byte, 0, len(tag)+len(pm[1])+12)
+		t = append(t, tag[:i]...)
+		t = append(t, ` subject="`...)
+		t = append(t, pm[1]...)
+		t = append(t, '"')
+		return append(t, tag[i:]...)
+	})
+	return out, fixed
 }

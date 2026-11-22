@@ -17,6 +17,7 @@ import (
 	"github.com/rs/zerolog"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/logger"
+	"github.com/sirrobot01/decypharr/internal/nntp"
 	"github.com/sirrobot01/decypharr/internal/utils"
 	"github.com/sirrobot01/decypharr/pkg/manager"
 	fuseconfig "github.com/sirrobot01/decypharr/pkg/mount/dfs/config"
@@ -848,9 +849,32 @@ func prewarmFile(vfsMgr *vfs.Manager, info *manager.FileInfo, log zerolog.Logger
 	if readErr != nil && off < want {
 		log.Warn().Str("file", info.Name()).Int64("bytes", off).Int64("wanted", want).Err(readErr).
 			Msg("Show precache: stopped early")
+		reportPrewarmFailure(vfsMgr, info, readErr)
 		return
 	}
 	log.Info().Str("file", info.Name()).Int64("bytes", off).Msg("Show precache: complete")
+}
+
+// reportPrewarmFailure hands a failed prewarm read to repair the way a
+// failed mounted read is (backend/hanwen/handle.go): the manager marks the
+// file broken only when the usenet layer has proof the data is gone, so a
+// dead next episode is repaired before the viewer presses play instead of
+// when they do. Our own timeout, pool contention and layout mismatches
+// prove nothing and are skipped, as there.
+func reportPrewarmFailure(vfsMgr *vfs.Manager, info *manager.FileInfo, err error) {
+	if vfsMgr == nil || !prewarmFailureMayBeProof(err) {
+		return
+	}
+	if mgr := vfsMgr.Manager(); mgr != nil {
+		mgr.ReportLiveReadFailure(info.InfoHash(), info.Parent(), info.Name(), info.Size())
+	}
+}
+
+// prewarmFailureMayBeProof: worth asking the manager (which checks for
+// proof) about this prewarm read failure.
+func prewarmFailureMayBeProof(err error) bool {
+	return err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) &&
+		!nntp.IsPoolCapacityError(err) && !nntp.IsLayoutMismatchError(err)
 }
 
 // normalizeEpisodeTitle makes two title strings comparable regardless of
