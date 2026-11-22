@@ -433,6 +433,11 @@ func (c *Client) ExecuteWithFailover(ctx context.Context, fn func(conn *Connecti
 			// excludes the whole backbone, so this is reached before the
 			// loop bound whenever providers share one; keep the real
 			// provider error rather than masking it as pool contention.
+			if errors.Is(err, errProviderPaused) {
+				// A paused provider was left out without being asked: the
+				// others' "no such article" is not proof it is gone.
+				lastTransientErr = err
+			}
 			if errors.Is(err, ErrNoEligibleProviders) && lastErr != nil {
 				break
 			}
@@ -731,7 +736,9 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 	if eligibleCount == 0 {
 		releaseBudget()
 		if pausedAny {
-			return nil, config.UsenetProvider{}, fmt.Errorf("%w: paused providers left out (refused login or unreachable)", ErrNoEligibleProviders)
+			// Both sentinels: pool contention to callers, and "a provider
+			// was never asked" to ExecuteWithFailover (never proof).
+			return nil, config.UsenetProvider{}, fmt.Errorf("%w: %w: paused providers left out (refused login or unreachable)", ErrNoEligibleProviders, errProviderPaused)
 		}
 		return nil, config.UsenetProvider{}, ErrNoEligibleProviders
 	}

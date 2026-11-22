@@ -233,3 +233,35 @@ func TestStatedLimitGuard(t *testing.T) {
 		}
 	}
 }
+
+// A paused provider is never asked, so "no such article" from the others
+// is not proof: it might have had the article.
+func TestPausedProviderKeepsNotFoundInconclusive(t *testing.T) {
+	withGuardTimes(t, time.Hour, time.Hour)
+	bad := startGuardServer(t, "200 ready", "481 authentication rejected")
+	good := startGuardServer(t, "200 ready", "281 ok")
+	for _, backup := range []bool{false, true} {
+		c := guardClient(t,
+			config.UsenetProvider{Host: bad.host, Port: bad.port, Username: "u", Password: "p", MaxConnections: 2, Backup: backup},
+			config.UsenetProvider{Host: "localhost", Port: good.port, Username: "u", Password: "p", MaxConnections: 2})
+		if backup {
+			// The primary serves the first request, so the backup is
+			// never dialed: pause it as a refused login would.
+			pp := c.pools[bad.host]
+			pp.guard.mu.Lock()
+			pp.guard.until, pp.guard.auth = time.Now().Add(time.Hour), true
+			pp.guard.mu.Unlock()
+		} else {
+			_ = stat(c) // the refused login pauses bad
+		}
+		if state, _, _, _, _ := c.pools[bad.host].guardState(); state != "auth_failed" {
+			t.Fatalf("backup=%v: state %q, want auth_failed", backup, state)
+		}
+		err := c.ExecuteWithFailover(context.Background(), func(conn *Connection) error {
+			return classifyNNTPError(430, "No such article")
+		})
+		if err == nil || IsArticleNotFoundError(err) {
+			t.Fatalf("backup=%v: err = %v, want inconclusive (paused provider never asked)", backup, err)
+		}
+	}
+}

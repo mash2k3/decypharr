@@ -247,12 +247,15 @@ func (sf *SegmentFetcher) Fetch(ctx context.Context, segIdx int) error {
 		noteFetchTime(promise)
 	}
 	promise.err = err
-	close(promise.done)
 
-	// Cleanup
+	// Cleanup before waking waiters: a hedging reader that retries on
+	// wake-up must not find this finished promise still in flight.
 	sf.inFlightMu.Lock()
-	delete(sf.inFlight, segIdx)
+	if sf.inFlight[segIdx] == promise {
+		delete(sf.inFlight, segIdx)
+	}
 	sf.inFlightMu.Unlock()
+	close(promise.done)
 
 	return err
 }
