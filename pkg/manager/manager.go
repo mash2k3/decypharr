@@ -121,6 +121,7 @@ func New() *Manager {
 		KeepAlive: 30 * time.Second, // Keep connections alive
 	}
 
+	torboxCap := newHostConnCap(torboxConnsPerHost)
 	transport := &http.Transport{
 		TLSClientConfig: &tls.Config{
 			InsecureSkipVerify: true,
@@ -133,13 +134,14 @@ func New() *Manager {
 		MaxConnsPerHost:        500,
 		IdleConnTimeout:        120 * time.Second,
 		DisableCompression:     false, // Enable compression for better multiplexing
-		DialContext:            dialer.DialContext,
+		DialContext:            torboxCap.wrap(dialer.DialContext),
 		Proxy:                  http.ProxyFromEnvironment,
 		MaxResponseHeaderBytes: 1 << 20,  // 1MB header buffer for CDN responses
 		WriteBufferSize:        32 << 10, // 32KB write buffer
 		ReadBufferSize:         32 << 10, // 32KB read buffer
 	}
 
+	torboxCap.closeIdle = transport.CloseIdleConnections
 	streamClient := &http.Client{
 		Timeout:   0,
 		Transport: transport,

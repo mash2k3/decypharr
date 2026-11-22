@@ -32,6 +32,11 @@ type ProviderPool struct {
 	max         int
 	config      config.UsenetProvider
 	activeConns sync.Map // *Connection → struct{}; tracks checked-out connections for force-close on shutdown
+	// guard pauses a provider whose login is refused or that can't be
+	// reached, and caps it after "too many connections" (provider_guard.go).
+	guard     providerGuard
+	closed    chan struct{}
+	closeOnce sync.Once
 }
 
 // Client manages a pool of NNTP connections.
@@ -255,6 +260,7 @@ func NewClient(cfg *config.Config, metricStores ...*hybrid.Store) (*Client, erro
 			slots:  make(chan struct{}, p.MaxConnections),
 			max:    p.MaxConnections,
 			config: p,
+			closed: make(chan struct{}),
 		}
 		pools[p.Host] = pp
 	}
@@ -662,6 +668,19 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 	// slices on the common path: when a pool has a free slot, the first scan
 	// returns immediately. A slice is only needed for the uncommon all-busy
 	// fallback that races across providers.
+	// A paused provider (refused login, unreachable; provider_guard.go)
+	// with no idle connection is left out like an excluded one, so a dead
+	// primary lets the backups step in instead of failing every request.
+	pausedAny := false
+	for _, p := range c.providers {
+		if pp := c.pools[p.Host]; pp != nil && !exclusions.excludes(p) && pp.paused() {
+			if !pausedAny {
+				exclusions = exclusions.clone() // the caller's maps stay as they were
+			}
+			exclusions.excludeHost(p.Host)
+			pausedAny = true
+		}
+	}
 	useBackups := true
 	for _, p := range c.providers {
 		if !p.Backup && !exclusions.excludes(p) {
@@ -711,6 +730,9 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 
 	if eligibleCount == 0 {
 		releaseBudget()
+		if pausedAny {
+			return nil, config.UsenetProvider{}, fmt.Errorf("%w: paused providers left out (refused login or unreachable)", ErrNoEligibleProviders)
+		}
 		return nil, config.UsenetProvider{}, ErrNoEligibleProviders
 	}
 
@@ -898,7 +920,7 @@ func (c *Client) getOrCreateFromPool(ctx context.Context, pp *ProviderPool, prov
 	}
 
 	// No pooled connection available, create new one
-	conn, err := c.createConnection(ctx, provider)
+	conn, err := c.dialGuarded(ctx, pp, provider)
 	if err != nil {
 		return nil, err
 	}
@@ -934,6 +956,32 @@ func (c *Client) tuneTCP(tcpConn *net.TCPConn) {
 	if c.sockWriteBuf > 0 {
 		_ = tcpConn.SetWriteBuffer(c.sockWriteBuf)
 	}
+}
+
+// dialGuarded is createConnection through the provider's guard: refused
+// while the provider is paused, and its outcome feeds the breaker and the
+// "too many connections" cap. The caller holds a slot of pp.
+func (c *Client) dialGuarded(ctx context.Context, pp *ProviderPool, provider config.UsenetProvider) (*Connection, error) {
+	probe, err := pp.admit()
+	if err != nil {
+		return nil, err
+	}
+	conn, err := c.createConnection(ctx, provider)
+	opened, recovered := pp.dialResult(probe, err, ctx.Err())
+	switch {
+	case err != nil && ctx.Err() == nil && classifyDialError(err, nil) == dialBusy:
+		pp.throttle(err)
+		_, _, learned, capNow, _ := pp.guardState()
+		c.logger.Warn().Err(err).Str("host", provider.Host).Int("limit_now", capNow).Int("server_limit", learned).
+			Msg("Provider refused more connections; lowering its connection limit for now")
+	case opened > 0:
+		state, _, _, _, _ := pp.guardState()
+		c.logger.Warn().Err(err).Str("host", provider.Host).Str("state", state).Dur("retry_in", opened).
+			Msg("Provider paused: not dialed again until the retry")
+	case recovered:
+		c.logger.Info().Str("host", provider.Host).Msg("Provider back after being paused")
+	}
+	return conn, err
 }
 
 // createConnection creates a new NNTP connection to a provider
@@ -1103,7 +1151,7 @@ func (c *Client) warmProviderPool(pp *ProviderPool) {
 			return
 		}
 
-		conn, err := c.createConnection(context.Background(), pp.config)
+		conn, err := c.dialGuarded(context.Background(), pp, pp.config)
 		if err != nil {
 			<-pp.slots
 			c.logger.Debug().Err(err).Str("host", pp.config.Host).Msg("Pool warmup: failed to dial idle connection")
@@ -1247,8 +1295,10 @@ func (c *Client) Stats() map[string]interface{} {
 		idle := len(pp.conns)
 		pp.mu.Unlock()
 
-		// Active = slots in use (tokens in the semaphore channel)
-		active := len(pp.slots)
+		// Active = slots in use (tokens in the semaphore channel), minus
+		// the ones parked by a "too many connections" cap.
+		state, retryIn, learned, capNow, parked := pp.guardState()
+		active := max(len(pp.slots)-parked, 0)
 		maxC := pp.max
 
 		totalActive += active
@@ -1262,6 +1312,12 @@ func (c *Client) Stats() map[string]interface{} {
 			"active":          active,
 			"idle":            idle,
 			"ssl":             p.SSL,
+			// "ok", "auth_failed" (login refused) or "down" (unreachable):
+			// a paused provider is skipped until retry_in_s runs out.
+			"state":        state,
+			"retry_in_s":   retryIn.Seconds(),
+			"limit_now":    capNow,
+			"server_limit": learned,
 		}
 
 		if p.SubscriptionExpiry != "" {
@@ -1303,22 +1359,22 @@ func (c *Client) Stats() map[string]interface{} {
 	if c.interactive != nil {
 		snap := c.interactive.snapshot()
 		stats["interactive"] = map[string]interface{}{
-			"enabled":              snap.Enabled,
-			"active":               snap.Active,
-			"active_streams":       snap.ActiveStreams,
-			"per_stream_reserve":   snap.PerStreamReserve,
-			"reserved":             snap.Reserved,
-			"background_budget":    snap.BackgroundBudget,
-			"background_in_use":    snap.BackgroundInUse,
-			"stream_in_use":        snap.StreamInUse,
-			"reserve_percent":      snap.ReservePercent,
-			"reserve_min":          snap.ReserveMin,
-			"reserve_max":          snap.ReserveMax,
-			"reserve_per_stream":   snap.ReservePerStream,
-			"last_entry":           snap.LastEntry,
-			"last_file":            snap.LastFile,
-			"last_client":          snap.LastClient,
-			"started_at":           snap.StartedAt,
+			"enabled":            snap.Enabled,
+			"active":             snap.Active,
+			"active_streams":     snap.ActiveStreams,
+			"per_stream_reserve": snap.PerStreamReserve,
+			"reserved":           snap.Reserved,
+			"background_budget":  snap.BackgroundBudget,
+			"background_in_use":  snap.BackgroundInUse,
+			"stream_in_use":      snap.StreamInUse,
+			"reserve_percent":    snap.ReservePercent,
+			"reserve_min":        snap.ReserveMin,
+			"reserve_max":        snap.ReserveMax,
+			"reserve_per_stream": snap.ReservePerStream,
+			"last_entry":         snap.LastEntry,
+			"last_file":          snap.LastFile,
+			"last_client":        snap.LastClient,
+			"started_at":         snap.StartedAt,
 		}
 	}
 
@@ -1375,6 +1431,21 @@ func (e *providerExclusions) excludeBackbone(backbone string) {
 		e.backbones = make(map[string]struct{})
 	}
 	e.backbones[backbone] = struct{}{}
+}
+
+// clone returns a copy whose maps can be changed without touching e's.
+func (e providerExclusions) clone() providerExclusions {
+	var out providerExclusions
+	for h := range e.hosts {
+		out.excludeHost(h)
+	}
+	for b := range e.backbones {
+		if out.backbones == nil {
+			out.backbones = make(map[string]struct{})
+		}
+		out.backbones[b] = struct{}{}
+	}
+	return out
 }
 
 func (e providerExclusions) excludes(provider config.UsenetProvider) bool {
@@ -1697,6 +1768,7 @@ func (c *Client) Close() error {
 
 	var totalClosed int
 	for _, pp := range c.pools {
+		pp.closeOnce.Do(func() { close(pp.closed) })
 		pp.mu.Lock()
 		// Close idle connections
 		for _, entry := range pp.conns {

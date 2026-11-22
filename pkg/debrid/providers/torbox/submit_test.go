@@ -129,3 +129,21 @@ func TestPauseAddsDefaultAndCap(t *testing.T) {
 		t.Fatalf("paused for %s, want at most %s", wait, maxAddLimitPause)
 	}
 }
+
+// TorBox zips 100+ file torrents unless allow_zip=false is sent.
+func TestSubmitMagnetSendsAllowZipFalse(t *testing.T) {
+	var got string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_ = r.ParseMultipartForm(1 << 20)
+		got = r.FormValue("allow_zip")
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = fmt.Fprint(w, `{"success":true,"data":{"torrent_id":17,"hash":"`+submitHash+`"}}`)
+	}))
+	t.Cleanup(server.Close)
+	if _, err := testTorbox(server.URL).SubmitMagnet(submitTorrent()); err != nil {
+		t.Fatal(err)
+	}
+	if got != "false" {
+		t.Fatalf("allow_zip = %q, want false", got)
+	}
+}

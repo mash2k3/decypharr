@@ -57,6 +57,84 @@ type SegmentFetcher struct {
 type fetchPromise struct {
 	done chan struct{}
 	err  error
+	// prefetch: a background read-ahead fetch, which a playback read may
+	// cancel after waiting hedgeAfter (see joinOrHedge). cancel ends it.
+	prefetch bool
+	cancel   context.CancelFunc
+	onWire   atomic.Int64 // unix ns the download got a connection (0 = still queued)
+}
+
+// Live hedge (Ether's liveHedgeDelay, as in cli_debrid's built-in engine):
+// a playback read waiting on a background prefetch of the same segment
+// gives it hedgeAfter, then cancels it and downloads the segment itself.
+// Before, it waited however long the prefetch took, up to DownloadTimeout
+// on a stalled connection. Two downloads can't share a segment's disk slot,
+// so the slow one is cancelled instead of raced. The wait scales with how
+// long downloads normally take (shared by every file), so an ordinary
+// download on a full line is never thrown away. Vars for tests.
+var (
+	hedgeMin     = 400 * time.Millisecond
+	hedgeMax     = 8 * time.Second
+	hedgeDefault = 3 * time.Second // before any download time is known
+	fetchNs      atomic.Int64      // moving average, connection to finished segment
+)
+
+func hedgeAfter() time.Duration {
+	avg := fetchNs.Load()
+	if avg == 0 {
+		return hedgeDefault
+	}
+	return min(max(time.Duration(3*avg), hedgeMin), hedgeMax)
+}
+
+func noteFetchTime(p *fetchPromise) {
+	at := p.onWire.Load()
+	if at == 0 {
+		return
+	}
+	d := time.Now().UnixNano() - at
+	if old := fetchNs.Load(); old == 0 {
+		fetchNs.Store(d)
+	} else {
+		fetchNs.Store(old + (d-old)/8)
+	}
+}
+
+type promiseKey struct{}
+
+// joinOrHedge waits on a background prefetch for up to hedgeAfter from when
+// it got a connection (or from now, if it is still queued). hedged=true
+// means it was cancelled and has finished: the caller fetches itself.
+func (sf *SegmentFetcher) joinOrHedge(ctx context.Context, p *fetchPromise) (hedged bool, err error) {
+	wait := hedgeAfter()
+	if at := p.onWire.Load(); at != 0 {
+		wait -= time.Since(time.Unix(0, at))
+	}
+	t := time.NewTimer(max(wait, 0))
+	defer t.Stop()
+	select {
+	case <-p.done:
+		if p.err != nil && (errors.Is(p.err, context.Canceled) || errors.Is(p.err, context.DeadlineExceeded)) {
+			return true, nil // the prefetch gave up on its own; that's not our error
+		}
+		return false, p.err
+	case <-ctx.Done():
+		return false, ctx.Err()
+	case <-sf.ctx.Done():
+		return false, sf.ctx.Err()
+	case <-t.C:
+	}
+	sf.stats.Hedges.Add(1)
+	p.cancel()
+	select {
+	case <-p.done: // closing its connection ends it promptly
+	case <-ctx.Done():
+		return false, ctx.Err()
+	}
+	if p.err == nil {
+		return false, nil // it finished in the meantime
+	}
+	return true, nil
 }
 
 // NewSegmentFetcher creates a new segment fetcher.
@@ -133,6 +211,13 @@ func (sf *SegmentFetcher) Fetch(ctx context.Context, segIdx int) error {
 	sf.inFlightMu.Lock()
 	if promise, ok := sf.inFlight[segIdx]; ok {
 		sf.inFlightMu.Unlock()
+		if promise.prefetch && !nntp.WorkClassIsExplicitlyBackground(ctx) {
+			hedged, err := sf.joinOrHedge(ctx, promise)
+			if !hedged {
+				return err
+			}
+			return sf.Fetch(ctx, segIdx) // the slow prefetch is gone: fetch it ourselves
+		}
 		// Wait for existing fetch
 		select {
 		case <-promise.done:
@@ -145,12 +230,22 @@ func (sf *SegmentFetcher) Fetch(ctx context.Context, segIdx int) error {
 	}
 
 	// We're the first - create promise
-	promise := &fetchPromise{done: make(chan struct{})}
+	promise := &fetchPromise{done: make(chan struct{}), prefetch: nntp.WorkClassIsExplicitlyBackground(ctx)}
+	fetchCtx := ctx
+	if promise.prefetch {
+		var cancel context.CancelFunc
+		fetchCtx, cancel = context.WithCancel(ctx)
+		defer cancel()
+		promise.cancel = cancel
+	}
 	sf.inFlight[segIdx] = promise
 	sf.inFlightMu.Unlock()
 
 	// Actually fetch
-	err := sf.doFetch(ctx, segIdx)
+	err := sf.doFetch(context.WithValue(fetchCtx, promiseKey{}, promise), segIdx)
+	if err == nil {
+		noteFetchTime(promise)
+	}
 	promise.err = err
 	close(promise.done)
 
@@ -254,7 +349,11 @@ func (sf *SegmentFetcher) doFetch(ctx context.Context, segIdx int) error {
 // that belongs to another file.
 func (sf *SegmentFetcher) fetchBody(downloadCtx context.Context, seg *SegmentMeta, segIdx int, messageID string) error {
 	expected := seg.SegmentDataStart + seg.Bytes
+	promise, _ := downloadCtx.Value(promiseKey{}).(*fetchPromise)
 	return sf.client.ExecuteWithFailover(nntp.WithMissHint(downloadCtx, &sf.miss), func(conn *nntp.Connection) error {
+		if promise != nil {
+			promise.onWire.CompareAndSwap(0, time.Now().UnixNano())
+		}
 		stopCancel := context.AfterFunc(downloadCtx, func() {
 			_ = conn.Close()
 		})

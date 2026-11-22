@@ -263,6 +263,7 @@ type ReaderStats struct {
 	// Prefetch
 	PrefetchHits      atomic.Int64
 	PrefetchMisses    atomic.Int64
+	Hedges            atomic.Int64 // playback reads that cancelled a slow prefetch and fetched themselves
 	PrefetchCancelled atomic.Int64 // hints dropped because a seek abandoned their window
 }
 
@@ -281,6 +282,7 @@ func (s *ReaderStats) Snapshot() map[string]int64 {
 		"download_errors":    s.DownloadErrors.Load(),
 		"prefetch_hits":      s.PrefetchHits.Load(),
 		"prefetch_misses":    s.PrefetchMisses.Load(),
+		"hedges":             s.Hedges.Load(),
 		"prefetch_cancelled": s.PrefetchCancelled.Load(),
 	}
 }
