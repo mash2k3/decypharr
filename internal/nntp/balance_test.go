@@ -75,6 +75,34 @@ func TestBalancedOrderPrefersLeastLoaded(t *testing.T) {
 	}
 }
 
+// Balanced never reorders backups: once the primary lacks an article the
+// highest-priority backup is asked every time, not a share by load.
+func TestBalancedKeepsBackupOrder(t *testing.T) {
+	providers := []config.UsenetProvider{
+		{Host: "a.example.com", MaxConnections: 1, Priority: 1},
+		{Host: "b1.example.com", MaxConnections: 1, Priority: 2, Backup: true},
+		{Host: "b2.example.com", MaxConnections: 1, Priority: 3, Backup: true},
+	}
+	client, owners := failoverTestClient(t, providers)
+	client.balanced = true
+	served := map[string]int{}
+	for range 20 {
+		err := client.ExecuteWithFailover(context.Background(), func(conn *Connection) error {
+			if owners[conn] == "a.example.com" {
+				return classifyNNTPError(430, "No such article")
+			}
+			served[owners[conn]]++
+			return nil
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if served["b1.example.com"] != 20 || served["b2.example.com"] != 0 {
+		t.Fatalf("backups served %v, want all on b1", served)
+	}
+}
+
 // Balanced only changes who is asked first: an article missing on every
 // provider is still proof, and a transient failure anywhere still isn't.
 func TestBalancedKeepsProofRules(t *testing.T) {

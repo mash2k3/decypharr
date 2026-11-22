@@ -15,9 +15,10 @@ func LoadBalanced(mode string) bool {
 	return strings.EqualFold(strings.TrimSpace(mode), "balanced")
 }
 
-// balancedOrder returns the eligible providers of one tier, least loaded
-// first (slots in use over max), starting the scan of equal loads at a
-// rotating position so idle providers take turns. Providers the request's
+// balancedOrder returns the eligible primaries (the caller never asks it
+// for the backup tier, which keeps priority order), least loaded first
+// (slots in use over max), starting the scan of equal loads at a rotating
+// position so idle providers take turns. Providers the request's
 // miss hint says keep lacking this file's articles go last: still asked,
 // never skipped, so "missing on every provider" proof is unchanged.
 func (c *Client) balancedOrder(ctx context.Context, exclusions providerExclusions, useBackups bool) []config.UsenetProvider {

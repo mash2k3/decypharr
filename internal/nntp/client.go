@@ -672,8 +672,10 @@ func (c *Client) getAnyAvailableConnection(ctx context.Context, exclusions provi
 
 	// Phase 1: Non-blocking scan - try to get a free slot from any provider
 	// within the current tier.
+	// Only primaries are balanced; backups keep priority order in both
+	// modes so the first backup (often a block account) is asked first.
 	scan := c.providers
-	if c.balanced {
+	if c.balanced && !useBackups {
 		scan = c.balancedOrder(ctx, exclusions, useBackups)
 	}
 	eligibleCount := 0
