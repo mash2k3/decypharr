@@ -388,7 +388,7 @@ func findFileByBasename(mgr *manager.Manager, basename string) *manager.FileInfo
 // startPlexSessionPoller runs until ctx is cancelled when Plex credentials are
 // configured and either prewarm or playback protection is enabled.
 // sessionSource is one media server polled for playback sessions: Plex, or
-// Jellyfin/Emby (jellyfin_sessions.go).
+// Jellyfin/Emby (jellyfin_sessions.go), or Silo (silo_sessions.go).
 type sessionSource struct {
 	name  string
 	fetch func(ctx context.Context) ([]plexSession, error)
@@ -416,21 +416,30 @@ func (m *Manager) sessionSources(client *http.Client) []sessionSource {
 			},
 		})
 	}
+	if u, k := m.config.SiloURL, m.config.SiloAPIKey; u != "" && k != "" {
+		out = append(out, sessionSource{
+			name:  "Silo",
+			fetch: func(ctx context.Context) ([]plexSession, error) { return fetchSiloSessions(ctx, client, u, k) },
+			next: func(ctx context.Context, s plexSession) plexEpisodeTarget {
+				return fetchSiloNextEpisode(ctx, client, u, k, s)
+			},
+		})
+	}
 	return out
 }
 
 // startPlexSessionPoller runs until ctx is cancelled when a media server
-// (Plex, Jellyfin/Emby) is configured and show precache or stream
+// (Plex, Jellyfin/Emby, Silo) is configured and show precache or stream
 // protection needs it.
 func (m *Manager) startPlexSessionPoller(ctx context.Context) {
 	client := &http.Client{Timeout: 10 * time.Second}
 	sources := m.sessionSources(client)
 	if len(sources) == 0 {
 		if m.config.PrewarmNextEpisode {
-			m.logger.Warn().Msg("Show precache: enabled but no media server (Plex, or Jellyfin/Emby URL and API key) is set - nothing will happen")
+			m.logger.Warn().Msg("Show precache: enabled but no media server (Plex, Jellyfin/Emby or Silo URL and API key) is set - nothing will happen")
 		}
 		if m.manager != nil && m.manager.InteractivePoolReserveEnabled() {
-			m.logger.Warn().Msg("Stream protection: enabled but no media server (Plex, or Jellyfin/Emby URL and API key) is set - protection inactive")
+			m.logger.Warn().Msg("Stream protection: enabled but no media server (Plex, Jellyfin/Emby or Silo URL and API key) is set - protection inactive")
 		}
 		return
 	}
