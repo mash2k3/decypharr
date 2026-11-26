@@ -10,12 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/debrid/providers/torbox"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -208,6 +210,19 @@ func isConnectionError(err error) bool {
 	return errors.As(err, &netErr)
 }
 
+// serverRefused: the request never reached the link's server (refused, no
+// route), as opposed to a reset or timeout mid-transfer.
+func serverRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "actively refused")
+}
+
 // Stream streams a file from an entry to the provided writer within the specified byte range.
 // client identifies the caller (e.g., User-Agent for WebDAV, "DFS" for DFS mount).
 func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename string, start, end int64, writer io.Writer, onReady StreamReadyFunc, client string) error {
@@ -313,6 +328,22 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 
 	resp, reqErr := m.doRequest(ctx, downloadLink.DownloadLink, reqStart, reqEnd)
 	if reqErr != nil {
+		// The link's server refuses connections: retrying the cached link
+		// can't help (found live: TorBox nexus-405.ecan refused every
+		// connection for hours while the link stayed cached for 2h45m).
+		// Drop it; TorBox then mints on another region's CDN. Other
+		// providers keep the one-minute age guard against mint loops.
+		if serverRefused(reqErr) {
+			isTorBox := torbox.IsCDNLink(downloadLink.DownloadLink)
+			if isTorBox {
+				torbox.MarkCDNDown(downloadLink.DownloadLink)
+			}
+			if isTorBox || time.Since(downloadLink.Generated) >= minLinkAgeForRefetch {
+				m.linkService.InvalidateLink(downloadLink)
+				return StreamError{Err: fmt.Errorf("download server unreachable, refetching link: %w", reqErr),
+					Retryable: true, LinkError: true}
+			}
+		}
 		// Network/connection error - retriable
 		return reqErr
 	}
