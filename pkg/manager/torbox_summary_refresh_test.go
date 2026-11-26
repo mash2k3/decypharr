@@ -130,8 +130,7 @@ func (f *summaryRefreshClient) GetTorrent(id string) (*debridTypes.Torrent, erro
 	if t == nil {
 		return nil, nil
 	}
-	copy := *t
-	return &copy, nil
+	return t.Copy(), nil // not *t: Torrent embeds a sync.Mutex
 }
 // GetTorrents returns fresh copies, as a real list call does; handing out the
 // same pointers would let one pass's UpdateTorrent leak into the next poll.

@@ -529,6 +529,9 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 
 		t.Files[fileName] = file
 	}
+	if len(t.Files) == 0 {
+		tb.zipFiles(t, data, true) // a pack TorBox stores as one zip
+	}
 	var cleanPath string
 	if len(t.Files) > 0 {
 		cleanPath = path.Clean(data.Files[0].Name)
@@ -624,6 +627,9 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 		}
 
 		t.Files[fileName] = file
+	}
+	if len(t.Files) == 0 {
+		tb.zipFiles(t, data, true) // a pack TorBox stores as one zip
 	}
 
 	var cleanPath string
@@ -841,6 +847,9 @@ func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 			}
 
 			t.Files[fileName] = file
+		}
+		if len(t.Files) == 0 {
+			tb.zipFiles(t, &data, false) // listing: only an index already read
 		}
 
 		var cleanPath string
