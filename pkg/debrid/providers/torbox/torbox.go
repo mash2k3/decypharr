@@ -529,6 +529,9 @@ func (tb *Torbox) GetTorrent(torrentId string) (*types.Torrent, error) {
 
 		t.Files[fileName] = file
 	}
+	if len(t.Files) == 0 {
+		tb.zipFiles(t, data, true) // a pack TorBox stores as one zip
+	}
 	var cleanPath string
 	if len(t.Files) > 0 {
 		cleanPath = path.Clean(data.Files[0].Name)
@@ -625,6 +628,9 @@ func (tb *Torbox) UpdateTorrent(t *types.Torrent) error {
 
 		t.Files[fileName] = file
 	}
+	if len(t.Files) == 0 {
+		tb.zipFiles(t, data, true) // a pack TorBox stores as one zip
+	}
 
 	var cleanPath string
 	if len(t.Files) > 0 {
@@ -716,14 +722,25 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 	if client == nil {
 		client = tb.client
 	}
-	var res DownloadLinksResponse
-	resp, err := tb.doGetWithClient(client, "/api/torrents/requestdl", map[string]string{
-		"token":      account.Token,
-		"torrent_id": id,
-		"file_id":    file.Id,
-		"redirect":   "false",
-	}, &res)
-	if err == nil && resp.StatusCode == http.StatusOK && res.Success && res.Data != nil && strings.HasPrefix(*res.Data, "http") {
+	cdnURL, _, err := tb.requestCDNLink(client, account, id, file, "")
+	if err == nil && !cdnReachable(cdnURL) {
+		// TorBox picked a CDN server that refuses connections: ask as if
+		// from another region, whose server usually works.
+		for _, r := range cdnRegions {
+			alt, _, altErr := tb.requestCDNLink(client, account, id, file, r.ip)
+			if altErr != nil {
+				tb.logger.Debug().Err(altErr).Msgf("TorBox %s link for %s/%s failed", r.region, id, file.Id)
+				continue
+			}
+			if cdnReachable(alt) {
+				tb.logger.Warn().Msgf("TorBox CDN server %s is unreachable; using %s (%s) for %s",
+					cdnHost(cdnURL), cdnHost(alt), r.region, file.Name)
+				cdnURL = alt
+				break
+			}
+		}
+	}
+	if err == nil {
 		if cdnExp := now.Add(cdnLinkLifetime); cdnExp.Before(expiresAt) {
 			expiresAt = cdnExp
 		}
@@ -732,22 +749,41 @@ func (tb *Torbox) fetchDownloadLink(account *account.Account, id string, file *t
 			Size:         file.Size,
 			Token:        account.Token,
 			Link:         file.Link,
-			DownloadLink: *res.Data,
+			DownloadLink: cdnURL,
 			Debrid:       tb.config.Name,
 			Id:           file.Id,
 			Generated:    now,
 			ExpiresAt:    expiresAt,
 		}, nil
 	}
+	return types.DownloadLink{}, err
+}
 
+// requestCDNLink asks requestdl for the file's CDN URL; userIP ("" = ours)
+// makes TorBox pick the CDN server of that address's region.
+func (tb *Torbox) requestCDNLink(client *request.Client, account *account.Account, id string, file *types.File, userIP string) (string, int, error) {
+	params := map[string]string{
+		"token":      account.Token,
+		"torrent_id": id,
+		"file_id":    file.Id,
+		"redirect":   "false",
+	}
+	if userIP != "" {
+		params["user_ip"] = userIP
+	}
+	var res DownloadLinksResponse
+	resp, err := tb.doGetWithClient(client, "/api/torrents/requestdl", params, &res)
 	status := 0
 	if resp != nil {
 		status = resp.StatusCode
 	}
-	if err != nil {
-		return types.DownloadLink{}, fmt.Errorf("resolve TorBox CDN link (status %d): %w", status, err)
+	if err == nil && status == http.StatusOK && res.Success && res.Data != nil && strings.HasPrefix(*res.Data, "http") {
+		return *res.Data, status, nil
 	}
-	return types.DownloadLink{}, fmt.Errorf("resolve TorBox CDN link: status %d, success=%t", status, res.Success)
+	if err != nil {
+		return "", status, fmt.Errorf("resolve TorBox CDN link (status %d): %w", status, err)
+	}
+	return "", status, fmt.Errorf("resolve TorBox CDN link: status %d, success=%t", status, res.Success)
 }
 
 func (tb *Torbox) GetTorrents() ([]*types.Torrent, error) {
@@ -841,6 +877,9 @@ func (tb *Torbox) getTorrents(offset, limit int) ([]*types.Torrent, error) {
 			}
 
 			t.Files[fileName] = file
+		}
+		if len(t.Files) == 0 {
+			tb.zipFiles(t, &data, false) // listing: only an index already read
 		}
 
 		var cleanPath string

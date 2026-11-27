@@ -10,10 +10,6 @@ import (
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
-func getDownloadByteRange(info *manager.FileInfo) *[2]int64 {
-	return info.ByteRange()
-}
-
 func (h *Handler) StreamResponse(entry *storage.Entry, info *manager.FileInfo, w http.ResponseWriter, r *http.Request) error {
 	start, end := h.getRange(info, r)
 
@@ -83,9 +79,6 @@ func (h *Handler) handleSuccessfulResponse(w http.ResponseWriter, meta *manager.
 func (h *Handler) getRange(info *manager.FileInfo, r *http.Request) (int64, int64) {
 	rangeHeader := r.Header.Get("Range")
 	if rangeHeader == "" {
-		if byteRange := getDownloadByteRange(info); byteRange != nil {
-			return byteRange[0], byteRange[1]
-		}
 		// Signal downstream streaming code to serve the entire file
 		return 0, -1
 	}
@@ -95,12 +88,7 @@ func (h *Handler) getRange(info *manager.FileInfo, r *http.Request) (int64, int6
 		return 0, 0
 	}
 
-	byteRange := getDownloadByteRange(info)
-	start, end := ranges[0].start, ranges[0].end
-
-	if byteRange != nil {
-		start += byteRange[0]
-		end += byteRange[0]
-	}
-	return start, end
+	// Member-relative: Manager.Stream shifts a byte-range file's request
+	// into the provider file itself.
+	return ranges[0].start, ranges[0].end
 }

@@ -10,12 +10,14 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	"github.com/puzpuzpuz/xsync/v4"
 	"github.com/sirrobot01/decypharr/internal/config"
 	"github.com/sirrobot01/decypharr/internal/retry"
 	"github.com/sirrobot01/decypharr/internal/utils"
+	"github.com/sirrobot01/decypharr/pkg/debrid/providers/torbox"
 	"github.com/sirrobot01/decypharr/pkg/storage"
 )
 
@@ -208,6 +210,19 @@ func isConnectionError(err error) bool {
 	return errors.As(err, &netErr)
 }
 
+// serverRefused: the request never reached the link's server (refused, no
+// route), as opposed to a reset or timeout mid-transfer.
+func serverRefused(err error) bool {
+	if err == nil {
+		return false
+	}
+	if errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EHOSTUNREACH) || errors.Is(err, syscall.ENETUNREACH) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "connection refused") || strings.Contains(msg, "actively refused")
+}
+
 // Stream streams a file from an entry to the provided writer within the specified byte range.
 // client identifies the caller (e.g., User-Agent for WebDAV, "DFS" for DFS mount).
 func (m *Manager) Stream(ctx context.Context, entry *storage.Entry, filename string, start, end int64, writer io.Writer, onReady StreamReadyFunc, client string) error {
@@ -306,10 +321,38 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 	buf := *bufPtr
 	defer streamBufPool.Put(bufPtr)
 
-	resp, reqErr := m.doRequest(ctx, downloadLink.DownloadLink, start, end)
+	// A file that is a byte range of the provider's file (a member of a
+	// stored zip or RAR the provider serves whole): start/end are relative
+	// to the member, the request is not.
+	reqStart, reqEnd := providerRange(file.ByteRange, start, end)
+
+	resp, reqErr := m.doRequest(ctx, downloadLink.DownloadLink, reqStart, reqEnd)
 	if reqErr != nil {
+		// The link's server refuses connections: retrying the cached link
+		// can't help (found live: TorBox nexus-405.ecan refused every
+		// connection for hours while the link stayed cached for 2h45m).
+		// Drop it; TorBox then mints on another region's CDN. Other
+		// providers keep the one-minute age guard against mint loops.
+		if serverRefused(reqErr) {
+			isTorBox := torbox.IsCDNLink(downloadLink.DownloadLink)
+			if isTorBox {
+				torbox.MarkCDNDown(downloadLink.DownloadLink)
+			}
+			if isTorBox || time.Since(downloadLink.Generated) >= minLinkAgeForRefetch {
+				m.linkService.InvalidateLink(downloadLink)
+				return StreamError{Err: fmt.Errorf("download server unreachable, refetching link: %w", reqErr),
+					Retryable: true, LinkError: true}
+			}
+		}
 		// Network/connection error - retriable
 		return reqErr
+	}
+
+	if file.ByteRange != nil && resp.StatusCode == http.StatusOK {
+		// The CDN ignored the range: the body is the archive's first bytes,
+		// not this member's.
+		resp.Body.Close()
+		return StreamError{Err: fmt.Errorf("provider ignored the range request for %s", filename), Retryable: true}
 	}
 
 	// Got response - check status
@@ -335,6 +378,19 @@ func (m *Manager) streamHTTP(ctx context.Context, torrent *storage.Entry, filena
 			meta.StatusCode = http.StatusPartialContent
 			if header != nil {
 				header["Content-Range"] = []string{buildContentRange(start, end, file.Size)}
+			}
+		}
+		if file.ByteRange != nil {
+			// The provider answered in the archive's offsets; callers see the member.
+			if isPartial {
+				if header != nil {
+					header["Content-Range"] = []string{buildContentRange(start, end, file.Size)}
+				}
+			} else {
+				meta.StatusCode = http.StatusOK
+				if header != nil {
+					delete(header, "Content-Range")
+				}
 			}
 		}
 
@@ -465,6 +521,15 @@ func (m *Manager) streamUsenet(ctx context.Context, entry *storage.Entry, filena
 
 	// Stream NZB content directly into writer
 	return m.usenet.Stream(ctx, entry.InfoHash, filename, start, end, writer)
+}
+
+// providerRange turns a member-relative range into the provider file's
+// offsets for a file that is a byte range [br[0], br[1]] of it.
+func providerRange(br *[2]int64, start, end int64) (int64, int64) {
+	if br == nil {
+		return start, end
+	}
+	return start + br[0], min(end+br[0], br[1])
 }
 
 func normalizeStreamRange(size, start, end int64) (int64, int64, error) {
