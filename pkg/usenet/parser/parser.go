@@ -1275,6 +1275,16 @@ func (p *NZBParser) enrichGroupWithFileInfo(ctx context.Context, group *FileGrou
 		group.fileMeta[metaKey] = res.meta
 	}
 
+	p.trimTrailingSurplus(ctx, group, func(ctx context.Context, id string) (*nntp.YencMetadata, error) {
+		var d *nntp.YencMetadata
+		err := p.manager.ExecuteWithFailover(ctx, func(conn *nntp.Connection) error {
+			m, e := conn.GetHeaderPrefix(id, metadataOnly)
+			d = m
+			return e
+		})
+		return d, err
+	})
+
 	// Set group-wide metadata using first file as reference
 	firstMetaKey := fileMetaKey(group.Files[0])
 	firstMeta, hasFirst := group.fileMeta[firstMetaKey]

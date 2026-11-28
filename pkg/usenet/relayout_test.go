@@ -230,3 +230,41 @@ func TestRetiredEntryClosesOnLastRelease(t *testing.T) {
 		t.Fatal("not closed on last release")
 	}
 }
+
+// Estimated slots plus two articles listed past the end of the file: the
+// surplus is dropped from the stored layout and never fetched.
+func TestRelayoutDropsTrailingSurplus(t *testing.T) {
+	headers := postedHeaders(3, 800, 2000)
+	f := newRelayoutFixture(t, storage.NZBFile{Name: "f.mkv", Size: 5000, Segments: estimatedSegments(5, 1000)}, headers, nil)
+
+	if got, reason := f.u.relayoutFile(context.Background(), "nzb1", "f.mkv", 1, 800); got != relayoutFixed {
+		t.Fatalf("outcome = %v (%s), want fixed", got, reason)
+	}
+	for _, id := range f.fetched {
+		if id == "m3" || id == "m4" {
+			t.Fatalf("surplus article %s was fetched", id)
+		}
+	}
+	nzb, _ := f.u.nzbStorage.GetNZB("nzb1")
+	if file := nzb.Files[0]; len(file.Segments) != 3 || file.Size != 2000 || nzb.TotalSize != 2000 {
+		t.Fatalf("stored %d segments, size %d (total %d); want 3, 2000", len(file.Segments), file.Size, nzb.TotalSize)
+	}
+	if err := f.u.IsFilePermanentlyFailed("nzb1", "f.mkv"); err != nil {
+		t.Fatalf("surplus must never fail a file: %v", err)
+	}
+}
+
+// A correct layout that still carries surplus is trimmed too; a shortfall
+// (fewer articles than the size needs) stays unfixable.
+func TestRelayoutSurplusOnCorrectLayoutAndShortfall(t *testing.T) {
+	segs := estimatedSegments(5, 800)
+	segs[2].Bytes, segs[2].EndOffset = 400, 1999
+	f := newRelayoutFixture(t, storage.NZBFile{Name: "f.mkv", Size: 2000, Segments: segs}, postedHeaders(3, 800, 2000), nil)
+	if got, reason := f.u.relayoutFile(context.Background(), "nzb1", "f.mkv", -1, 0); got != relayoutFixed {
+		t.Fatalf("outcome = %v (%s), want fixed (surplus trimmed)", got, reason)
+	}
+	short := newRelayoutFixture(t, storage.NZBFile{Name: "f.mkv", Size: 1600, Segments: estimatedSegments(2, 800)}, postedHeaders(3, 800, 2000), nil)
+	if got, _ := short.u.relayoutFile(context.Background(), "nzb1", "f.mkv", -1, 0); got != relayoutUnfixable {
+		t.Fatalf("shortfall outcome = %v, want unfixable", got)
+	}
+}
