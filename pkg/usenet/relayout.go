@@ -131,6 +131,14 @@ func (u *Usenet) relayoutFile(ctx context.Context, nzoID, filename string, short
 	if first.Begin != 1 || partSize <= 0 || total <= 0 {
 		return relayoutUnfixable, "first article is not the start of a posted file"
 	}
+	// An NZB may list articles past the end of the file (trailing surplus).
+	// They carry none of its bytes: lay out only the articles the size
+	// needs. The last needed article's header is checked below, so this
+	// only holds when the parts really are uniform up to the file's end.
+	if need := (total + partSize - 1) / partSize; need >= 1 && need < int64(n) {
+		segs = segs[:need]
+		n = int(need)
+	}
 	lastSize := total - partSize*int64(n-1)
 	if lastSize <= 0 || lastSize > partSize {
 		return relayoutUnfixable, fmt.Sprintf("%d articles of %d bytes don't make a %d-byte file", n, partSize, total)
@@ -146,7 +154,7 @@ func (u *Usenet) relayoutFile(ctx context.Context, nzoID, filename string, short
 	}
 
 	layout := uniformLayout(segs, partSize, lastSize)
-	if !sameLayout(segs, layout) || file.Size != total {
+	if !sameLayout(file.Segments, layout) || file.Size != total {
 		file.Segments = layout
 		file.Size = total
 		file.SegmentSize = partSize
